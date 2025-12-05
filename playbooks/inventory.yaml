@@ -1,0 +1,71 @@
+---
+- name: Gather SO Report from Hosts with PA Tag and Physical Hosts
+  hosts: physical-hosts:PA-tag-hosts
+  serial: 1
+  gather_facts: no
+
+  tasks:
+    - name: Create the CSV report file with header
+      copy:
+        content: "Hostname,OS Version,CPU Count,Total Memory (GB),Centrify Zone,Dynatrace Host Group\n"
+        dest: "/root/host-inventory-list/Linux_so_report.csv"
+        force: yes
+      delegate_to: olam.lab.local
+      run_once: true  
+
+    - name: Create the file with all hostnames
+      copy:
+        content: ""
+        dest: "/root/host-inventory-list/all_linux_so_report_names.txt"
+        force: yes
+      delegate_to: olam.lab.local
+      run_once: true  
+
+    - name: Write aggregated VM names
+      lineinfile:
+        path: /root/host-inventory-list/all_linux_so_report_names.txt
+        line: "{{ inventory_hostname }}"
+        insertafter: EOF
+      delegate_to: olam.lab.local
+
+    - name: Get OS Version
+      shell: grep PRETTY /etc/os-release | awk -F= '{gsub(/"/,""); print $2}'
+      register: Current_OSVersion
+
+    - name: Get CPU count
+      shell: lscpu | grep "^CPU(s):" | awk '{print $2}'
+      register: Current_CPUcount
+
+    - name: Get Total Memory in GB
+      shell: awk '/MemTotal/ {printf "%.2f\n", $2/1024/1024}' /proc/meminfo
+      register: Current_TotalMemory
+
+    - name: Get Centrify zone
+      shell: /usr/bin/adinfo | grep Zone | awk -F\/ '{print $5}'
+      register: Current_CentrifyZone
+      failed_when: false
+      changed_when: false
+
+    - name: Get Dynatrace host group
+      shell: /opt/dynatrace/oneagent/agent/tools/oneagentctl --get-host-group
+      register: Current_DynatraceHostGroup
+      failed_when: false
+      changed_when: false
+
+    - name: Build CSV line
+      set_fact:
+        csv_line: >-
+          {{ inventory_hostname }},
+          {{ Current_OSVersion.stdout | default('') }},
+          {{ Current_CPUcount.stdout | default('') }},
+          {{ Current_TotalMemory.stdout | default('') }},
+          {{ Current_CentrifyZone.stdout | default('') }},
+          {{ Current_DynatraceHostGroup.stdout | default('') }}
+
+    - name: Append CSV line to report
+      lineinfile:
+        path: /root/host-inventory-list/Linux_so_report.csv
+        line: "{{ csv_line }}"
+        insertafter: EOF
+      delegate_to: olam.lab.local
+      
