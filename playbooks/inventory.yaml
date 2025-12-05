@@ -10,7 +10,7 @@
         content: "Hostname,OS Version,CPU Count,Total Memory (GB),Centrify Zone,Dynatrace Host Group\n"
         dest: "/root/host-inventory-list/Linux_so_report.csv"
         force: yes
-      delegate_to: olam
+      delegate_to: localhost
       run_once: true  
 
     - name: Create the file with all hostnames
@@ -18,7 +18,7 @@
         content: ""
         dest: "/root/host-inventory-list/all_linux_so_report_names.txt"
         force: yes
-      delegate_to: olam
+      delegate_to: localhost
       run_once: true  
 
     - name: Write aggregated VM names
@@ -26,7 +26,7 @@
         path: /root/host-inventory-list/all_linux_so_report_names.txt
         line: "{{ inventory_hostname }}"
         insertafter: EOF
-      delegate_to: olam
+      delegate_to: localhost
 
     - name: Get OS Version
       shell: grep PRETTY /etc/os-release | awk -F= '{gsub(/"/,""); print $2}'
@@ -67,5 +67,5 @@
         path: /root/host-inventory-list/Linux_so_report.csv
         line: "{{ csv_line }}"
         insertafter: EOF
-      delegate_to: olam
+      delegate_to: localhost
       
