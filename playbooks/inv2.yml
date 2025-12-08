@@ -21,7 +21,7 @@
       ansible.builtin.lineinfile:
         path: "{{ report_path }}"
         line: "Hostname,OS Version,CPU Count,Total Memory (GB),Centrify Zone,Dynatrace Host Group"
-        create: yes
+        create: yes          # crea el archivo si no existe
         insertafter: BOF
       delegate_to: localhost
       run_once: true
@@ -61,5 +61,5 @@
           {{ current_centrify_zone.stdout | default('') }},
           {{ current_dynatrace_host_group.stdout | default('') }}
         insertafter: EOF
-        create: yes
+        create: yes          
       delegate_to: localhost
