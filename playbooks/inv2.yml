@@ -9,13 +9,21 @@
     report_path: "{{ report_dir }}/{{ report_file }}"
 
   tasks:
-    - name: Create CSV header if not exists
-      lineinfile:
+    - name: Ensure report directory exists on controller
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0700'
+      delegate_to: localhost
+      run_once: true
+
+    - name: Create CSV header if not exists (only once, on controller)
+      ansible.builtin.lineinfile:
         path: "{{ report_path }}"
         line: "Hostname,OS Version,CPU Count,Total Memory (GB),Centrify Zone,Dynatrace Host Group"
         create: yes
         insertafter: BOF
-      delegate_to: olam.lab.local
+      delegate_to: localhost
       run_once: true
 
     - name: Get OS Version
@@ -43,7 +51,7 @@
       changed_when: false
 
     - name: Append CSV row for this host on controller
-      lineinfile:
+      ansible.builtin.lineinfile:
         path: "{{ report_path }}"
         line: >-
           {{ inventory_hostname }},
@@ -53,4 +61,5 @@
           {{ current_centrify_zone.stdout | default('') }},
           {{ current_dynatrace_host_group.stdout | default('') }}
         insertafter: EOF
-      delegate_to: olam.lab.local
+        create: yes
+      delegate_to: localhost
