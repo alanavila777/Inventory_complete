@@ -4,64 +4,83 @@
   gather_facts: no
 
   vars:
-    # RUTA MODIFICADA: Usamos /tmp para evitar problemas de permisos de escritura con el usuario awx/olam.
-    report_dir: "/tmp/host-inventory-list" 
+    report_dir: "/root/host-inventory-list"
     report_file: "Linux_so_report.csv"
     report_path: "{{ report_dir }}/{{ report_file }}"
 
   tasks:
-    # Tarea para ASEGURAR que el directorio existe
-    - name: Ensure report directory exists
-      file:
+    # 0) Ver si ya existe el CSV actual en el controlador
+    - name: Check if current CSV exists on controller
+      ansible.builtin.stat:
+        path: "{{ report_path }}"
+      delegate_to: localhost
+      become: yes
+      become_user: root
+      run_once: true
+      register: report_stat
+
+    # 1) Si existe, renombrarlo con timestamp antes de generar uno nuevo
+    - name: Backup previous CSV on controller with timestamp
+      ansible.builtin.command: >
+        mv {{ report_path }}
+           {{ report_dir }}/Linux_so_report_{{ lookup('pipe','date +%Y%m%d%H%M%S') }}.csv
+      delegate_to: localhost
+      become: yes
+      become_user: root
+      run_once: true
+      when: report_stat.stat.exists
+
+    # 2) Asegurar que el directorio existe en el controlador
+    - name: Ensure report directory exists on controller
+      ansible.builtin.file:
         path: "{{ report_dir }}"
         state: directory
+        mode: '0700'
       delegate_to: localhost
+      become: yes
+      become_user: root
       run_once: true
 
-    # TAREA NUEVA: Elimina el archivo anterior para asegurar que se sobrescriba.
-    - name: Ensure old report file is deleted
-      file:
-        path: "{{ report_path }}"
-        state: absent
-      delegate_to: localhost
-      run_once: true
-
-    # Tarea para crear el encabezado CSV (que ahora se ejecuta siempre después de borrar el archivo)
-    - name: Create CSV header
-      lineinfile:
+    # 3) Crear el header del CSV NUEVO (se ejecuta una sola vez)
+    - name: Create CSV header on controller
+      ansible.builtin.lineinfile:
         path: "{{ report_path }}"
         line: "Hostname,OS Version,CPU Count,Total Memory (GB),Centrify Zone,Dynatrace Host Group"
         create: yes
         insertafter: BOF
       delegate_to: localhost
+      become: yes
+      become_user: root
       run_once: true
 
+    # 4) Recolección de datos en cada host
     - name: Get OS Version
-      shell: grep ^PRETTY_NAME= /etc/os-release | cut -d= -f2 | tr -d '"'
+      ansible.builtin.shell: grep ^PRETTY_NAME= /etc/os-release | cut -d= -f2 | tr -d '"'
       register: current_os_version
 
     - name: Get CPU count
-      shell: lscpu | awk '/^CPU\(s\):/ {print $2}'
+      ansible.builtin.shell: lscpu | awk '/^CPU\(s\):/ {print $2}'
       register: current_cpu_count
 
     - name: Get Total Memory in GB
-      shell: awk '/MemTotal/ {printf "%.2f", $2/1024/1024}' /proc/meminfo
+      ansible.builtin.shell: awk '/MemTotal/ {printf "%.2f", $2/1024/1024}' /proc/meminfo
       register: current_total_memory
 
     - name: Get Centrify zone (if available)
-      shell: /usr/bin/adinfo | awk -F'/' '/Zone/ {print $5}'
+      ansible.builtin.shell: /usr/bin/adinfo | awk -F'/' '/Zone/ {print $5}'
       register: current_centrify_zone
       failed_when: false
       changed_when: false
 
     - name: Get Dynatrace host group (if available)
-      shell: /opt/dynatrace/oneagent/agent/tools/oneagentctl --get-host-group
+      ansible.builtin.shell: /opt/dynatrace/oneagent/agent/tools/oneagentctl --get-host-group
       register: current_dynatrace_host_group
       failed_when: false
       changed_when: false
 
+    # 5) Añadir una fila al CSV NUEVO por cada host
     - name: Append CSV row for this host on controller
-      lineinfile:
+      ansible.builtin.lineinfile:
         path: "{{ report_path }}"
         line: >-
           {{ inventory_hostname }},
@@ -71,4 +90,7 @@
           {{ current_centrify_zone.stdout | default('') }},
           {{ current_dynatrace_host_group.stdout | default('') }}
         insertafter: EOF
+        create: yes
       delegate_to: localhost
+      become: yes
+      become_user: root
