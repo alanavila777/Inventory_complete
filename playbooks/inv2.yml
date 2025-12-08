@@ -15,7 +15,7 @@
         line: "Hostname,OS Version,CPU Count,Total Memory (GB),Centrify Zone,Dynatrace Host Group"
         create: yes
         insertafter: BOF
-      delegate_to: localhost
+      delegate_to: olam.lab.local
       run_once: true
 
     - name: Get OS Version
@@ -53,4 +53,4 @@
           {{ current_centrify_zone.stdout | default('') }},
           {{ current_dynatrace_host_group.stdout | default('') }}
         insertafter: EOF
-      delegate_to: localhost
+      delegate_to: olam.lab.local
