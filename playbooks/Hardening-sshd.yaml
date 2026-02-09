@@ -4,9 +4,18 @@
   become: true
   gather_facts: false
 
+  vars_prompt:
+    - name: ssh_macs_value
+      prompt: |
+        Enter SSH MACs to enforce (comma-separated, no spaces).
+        Example:
+        umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com
+      private: false
+      default: "umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,umac-128@openssh.com,hmac-sha2-256,hmac-sha2-512"
+
   vars:
-    ssh_macs_line: >-
-      MACs umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,hmac-sha2-512-etm@openssh.com,umac-128@openssh.com,hmac-sha2-256,hmac-sha2-512
+    ssh_macs_line: "MACs {{ ssh_macs_value }}"
+    expected_macs: "{{ ssh_macs_value }}"
 
     sshd_map:
       /usr/sbin/sshd:
@@ -18,9 +27,8 @@
 
   handlers:
     - name: restart ssh
-      ansible.builtin.service:
-        name: "{{ sshd_service_name }}"
-        state: restarted
+      ansible.builtin.command: "systemctl restart {{ sshd_service_name }}"
+      changed_when: true
 
   tasks:
     - name: Get sshd PID
@@ -42,7 +50,7 @@
     - name: Fail if unknown sshd binary
       ansible.builtin.fail:
         msg: "Unknown sshd binary running: {{ sshd_running_bin }}"
-      when: sshd_service_name == ''
+      when: sshd_service_name == '' or sshd_config_path == ''
 
     - name: Ensure MACs line (backup enabled)
       ansible.builtin.lineinfile:
@@ -53,7 +61,31 @@
         backup: true
       notify: restart ssh
 
-    - name: Validate sshd config (only OpenSSH)
-      ansible.builtin.command: "sshd -t -f {{ sshd_config_path }}"
+    # Ensure restart happens before validation
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+
+    - name: Get effective config via sshd -T
+      ansible.builtin.command: "{{ sshd_running_bin }} -T -f {{ sshd_config_path }}"
+      register: sshd_t
       changed_when: false
-      when: sshd_running_bin == '/usr/sbin/sshd'
+
+    - name: Extract applied MACs from sshd -T output
+      ansible.builtin.set_fact:
+        applied_macs: >-
+          {{
+            (sshd_t.stdout_lines
+              | select('match', '^(?i)macs\\s+')
+              | list
+              | first
+              | default('macs ')
+            ).split(None, 1)[1] | default('')
+          }}
+
+    - name: Fail if applied MACs do not match expected
+      ansible.builtin.fail:
+        msg: |
+          MACs mismatch after restart.
+          Expected: {{ expected_macs }}
+          Got:      {{ applied_macs }}
+      when: applied_macs | trim != expected_macs | trim
