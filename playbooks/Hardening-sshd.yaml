@@ -1,5 +1,5 @@
 ---
-- name: Detect running sshd (OpenSSH vs Centrify) and harden MACs (use LIMIT for targets)
+- name: Detect running sshd (OpenSSH vs Centrify) and harden MACs
   hosts: all
   become: true
   gather_facts: false
@@ -23,12 +23,6 @@
         state: restarted
 
   tasks:
-    # Guardrail for AWX Survey (recommended)
-    - name: Fail unless confirm_apply=true
-      ansible.builtin.fail:
-        msg: "Set confirm_apply=true (Survey/Extra Vars) to apply changes."
-      when: not (confirm_apply | default(false) | bool)
-
     - name: Get sshd PID
       ansible.builtin.command: pgrep -x sshd
       register: sshd_pids
