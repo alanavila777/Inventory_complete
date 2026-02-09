@@ -1,6 +1,6 @@
 ---
-- name: Detect running sshd (OpenSSH vs Centrify) and harden MACs (Survey required)
-  hosts: physical-hosts:PA-tag-hosts
+- name: Detect running sshd (OpenSSH vs Centrify) and harden MACs (use LIMIT for targets)
+  hosts: all
   become: true
   gather_facts: false
 
@@ -23,33 +23,14 @@
         state: restarted
 
   tasks:
-    # Survey validations FIRST
-    - name: Fail if target_hosts is not provided
+    # Guardrail for AWX Survey (recommended)
+    - name: Fail unless confirm_apply=true
       ansible.builtin.fail:
-        msg: "Survey variable 'target_hosts' is REQUIRED (comma-separated hosts or IPs)."
-      when: target_hosts is not defined or (target_hosts | trim) == ""
-
-    - name: Fail if confirm_apply is not true
-      ansible.builtin.fail:
-        msg: "Survey variable 'confirm_apply' must be set to TRUE to apply changes."
+        msg: "Set confirm_apply=true (Survey/Extra Vars) to apply changes."
       when: not (confirm_apply | default(false) | bool)
 
-    - name: Build target list from survey
-      ansible.builtin.set_fact:
-        target_list: "{{ target_hosts.split(',') | map('trim') | reject('equalto','') | list }}"
-
-    # Skip hosts not selected
-    - name: Skip hosts not selected in survey
-      ansible.builtin.meta: end_host
-      when:
-        - inventory_hostname not in target_list
-        - (hostvars[inventory_hostname].ansible_host | default('')) not in target_list
-
-    # -------------------------
-    # SSHD detection & hardening
-    # -------------------------
     - name: Get sshd PID
-      ansible.builtin.command: "pgrep -x sshd"
+      ansible.builtin.command: pgrep -x sshd
       register: sshd_pids
       changed_when: false
 
