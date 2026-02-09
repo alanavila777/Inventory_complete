@@ -1,0 +1,50 @@
+---
+- name: Convert Linux SO CSV to HTML report
+  hosts: all
+  gather_facts: no
+
+  vars:
+    report_dir: "/root/host-inventory-list"
+    csv_file: "{{ report_dir }}/Linux_so_report.csv"
+    html_file: "{{ report_dir }}/Linux_so_report.html"
+
+  tasks:
+    - name: Check if current HTML report exists on controller
+      stat:
+        path: "{{ html_file }}"
+      delegate_to: localhost
+      run_once: true
+      register: html_stat
+
+    - name: Backup previous HTML report with timestamp
+      command: >
+        mv {{ html_file }}
+           {{ report_dir }}/Linux_so_report_{{ lookup('pipe','date +%Y%m%d%H%M%S') }}.html
+      delegate_to: localhost
+      run_once: true
+      when: html_stat.stat.exists
+
+    - name: Generate HTML report from CSV on controller
+      shell: |
+        awk -F',' '
+        BEGIN {
+          print "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>CSV</title>";
+          print "<style>table{border-collapse:collapse;width:100%;font-family:system-ui,sans-serif}th,td{border:1px solid #ddd;padding:8px}th{background:#f4f4f4;text-align:left}tr:nth-child(even){background:#fafafa}</style>";
+          print "</head><body><table>";
+        }
+        NR==1 {
+          printf "<thead><tr>";
+          for (i=1; i<=NF; i++) printf "<th>%s</th>", $i;
+          print "</tr></thead><tbody>";
+          next;
+        }
+        {
+          printf "<tr>";
+          for (i=1; i<=NF; i++) printf "<td>%s</td>", $i;
+          print "</tr>";
+        }
+        END { print "</tbody></table></body></html>" }' "{{ csv_file }}" > "{{ html_file }}"
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
+      run_once: true

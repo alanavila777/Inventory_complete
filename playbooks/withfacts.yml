@@ -1,7 +1,7 @@
 ---
 - name: Gather SO Report from Hosts with PA Tag and Physical Hosts
   hosts: "physical-hosts:PA-tag-hosts"
-  gather_facts: no
+  gather_facts: yes
 
   vars:
     report_dir: "/root/host-inventory-list"
@@ -24,6 +24,14 @@
       run_once: true
       when: report_stat.stat.exists
 
+    - name: Ensure report directory exists on controller
+      file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
     - name: Create CSV header if not exists
       lineinfile:
         path: "{{ report_path }}"
@@ -32,18 +40,6 @@
         insertafter: BOF
       delegate_to: localhost
       run_once: true
-
-    - name: Get OS Version
-      shell: grep ^PRETTY_NAME= /etc/os-release | cut -d= -f2 | tr -d '"'
-      register: current_os_version
-
-    - name: Get CPU count
-      shell: lscpu | awk '/^CPU\(s\):/ {print $2}'
-      register: current_cpu_count
-
-    - name: Get Total Memory in GB
-      shell: awk '/MemTotal/ {printf "%.2f", $2/1024/1024}' /proc/meminfo
-      register: current_total_memory
 
     - name: Get Centrify zone (if available)
       shell: /usr/bin/adinfo | awk -F'/' '/Zone/ {print $5}'
@@ -62,10 +58,11 @@
         path: "{{ report_path }}"
         line: >-
           {{ inventory_hostname }},
-          {{ current_os_version.stdout | default('') }},
-          {{ current_cpu_count.stdout | default('') }},
-          {{ current_total_memory.stdout | default('') }},
+          {{ ansible_distribution | default('') }} {{ ansible_distribution_version | default('') }},
+          {{ ansible_processor_vcpus | default('') }},
+          {{ (ansible_memtotal_mb | default(0) | float / 1024) | round(2) }},
           {{ current_centrify_zone.stdout | default('') }},
           {{ current_dynatrace_host_group.stdout | default('') }}
         insertafter: EOF
+        create: yes
       delegate_to: localhost
