@@ -1,0 +1,25 @@
+- name: Test connection to vCenter
+  hosts: localhost
+  gather_facts: false
+
+  collections:
+    - community.vmware
+
+  vars:
+    vcenter_hostname: "vcenter.lab.local"
+    vcenter_username: "svc_ansible@vsphere.local"
+    vcenter_password: "Estratel.2025"
+    validate_certs: false
+
+  tasks:
+
+    - name: Get vCenter info
+      vmware_about_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: "{{ validate_certs }}"
+      register: vcenter_info
+
+    - debug:
+        var: vcenter_info.about.instanceUuid
