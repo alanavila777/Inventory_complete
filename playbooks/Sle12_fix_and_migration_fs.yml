@@ -1,7 +1,7 @@
 ######## DETEC RAISER FS #########
 ---
 - name: Detect ReiserFS mount points (command + Ansible modules)
-  hosts: sles12_upgradable_hosts
+  hosts: all
   become: true
   gather_facts: false
 
