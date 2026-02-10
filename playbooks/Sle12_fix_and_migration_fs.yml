@@ -1,0 +1,56 @@
+######## DETEC RAISER FS #########
+---
+- name: Detect ReiserFS mount points (command + Ansible modules)
+  hosts: sles12_upgradable_hosts
+  become: true
+  gather_facts: false
+
+  vars:
+    output_file: /root/reiserfs_mounts.txt
+
+  tasks:
+    - name: Get reiserfs lines from /proc/self/mounts
+      ansible.builtin.command: >
+        grep -w reiserfs /proc/self/mounts
+      register: reiserfs_grep
+      changed_when: false
+      failed_when: false
+
+    - name: Build DEVICE MOUNTPOINT list
+      ansible.builtin.set_fact:
+        reiserfs_entries: >-
+          {{
+            (reiserfs_grep.stdout_lines | default([]))
+            | map('regex_replace', '^(\\S+)\\s+(\\S+)\\s+reiserfs\\s+.*$', '\\1 \\2')
+            | list
+          }}
+
+    - name: Write results (only if found)
+      ansible.builtin.copy:
+        dest: "{{ output_file }}"
+        content: "{{ reiserfs_entries | join('\n') ~ '\n' }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: reiserfs_entries | length > 0
+
+    - name: Remove output file if none found
+      ansible.builtin.file:
+        path: "{{ output_file }}"
+        state: absent
+      when: reiserfs_entries | length == 0
+
+    - name: Final status
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'Results saved in: ' ~ output_file
+            if (reiserfs_entries | length > 0)
+            else 'No ReiserFS filesystems were found on this system.'
+          }}
+
+###### FIX BOOT PARTITION ######
+
+#### CREATE A NEW FS ######
+
+#### MIGRATION RESCUE MODE #######
