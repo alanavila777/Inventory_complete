@@ -1,0 +1,153 @@
+---
+- name: Prechecks for SLES12 to SLES15 OS Upgrade
+  hosts: sles12_upgradable_hosts
+  gather_facts: yes
+  become: yes
+
+  vars:
+    current_date: "{{ ansible_facts['date_time']['date'] }}"
+    tmp_boot: /tmp/boot
+    vcenter_hostname: "vcenter.lab.local"
+    vcenter_username: "svc_ansible@vsphere.local"
+    vcenter_password: "Estratel.2025"
+    validate_certs: false
+
+  tasks:
+
+    - name: set host shortname
+      set_fact:
+        host_shortname: "{{ inventory_hostname | regex_replace('(^[^\\.]*).*', '\\1') | upper }}"
+
+################################### Set Default Vars ###################################
+
+    - name: set vm_snapped default
+      set_fact:
+        vm_snapped: false
+
+#################################### FIND VM(s) Folders, VCenter ####################################
+ 
+
+ 
+####################################  SNAPSHOT VM(s) ################################################
+    - name: Set vm path variable
+      set_fact:
+        vm_path: "{{ VMFindFolderPath }}"
+           
+    - name: Extract folder and datacenter from path
+      set_fact:    
+        vm_folder: "{{ vm_path | regex_replace('^\\/(\\w*)', '\\1') }}"
+        vm_datacenter: "{{ TargetSnapVcenter }}"
+ 
+    - name: Create pre-OS Migrate snapshot
+      vmware_guest_snapshot:
+        hostname: "{{ TargetSnapVcenter }}"
+        username: "{{ lookup('vars', 'vcenterUser') }}"
+        password: "{{ lookup('vars', 'vcenterPass') }}"
+        datacenter: "{{ vm_datacenter }}"
+        folder: "/{{ vm_folder }}"
+        name: "{{ host_shortname }}"
+        state: present
+        snapshot_name: Ansible Pre-OS Boot Migration - {{ current_date }}
+        description: Before applying OS Boot Migration - {{ ansible_date_time.date }}
+        validate_certs: no
+      delegate_to: localhost
+      register: snap_json
+ 
+    - name: Validate VM snapshot
+      set_fact:
+        vm_snapped: "{{ snap_json | json_query('changed') }}"
+
+################################  BOOT MIGRATION ################################################
+    - name: Detect /boot filesystem
+      shell: findmnt -n -o FSTYPE /boot || true
+      register: boot_fs
+      changed_when: false
+
+    - name: Stop if /boot is not reiserfs
+      meta: end_play
+      when: boot_fs.stdout != "reiserfs"
+
+    - name: Get /boot source from fstab
+      shell: awk '$2=="/boot"{print $1}' /etc/fstab | tail -n 1
+      register: boot_src
+      changed_when: false
+
+    - name: Remember if fstab used UUID=
+      set_fact:
+        boot_used_uuid: "{{ (boot_src.stdout | trim) is match('^UUID=') }}"
+      changed_when: false
+
+    - name: Resolve /boot block device
+      shell: |
+        src="{{ boot_src.stdout | trim }}"
+        if [[ "$src" == UUID=* ]]; then
+          blkid -o device -t UUID="${src#UUID=}"
+        else
+          echo "$src"
+        fi
+      register: boot_dev
+      changed_when: false
+
+    - name: Backup /boot
+      shell: |
+        mkdir -p {{ tmp_boot }}
+        rsync -av /boot/ {{ tmp_boot }}/
+
+    - name: Unmount /boot
+      command: umount /boot
+
+    - name: Format /boot as ext3
+      command: mkfs.ext3 -F {{ boot_dev.stdout | trim }}
+
+    - name: Update fstab for /boot -> use DEVICE + ext3 (temporary)
+      replace:
+        path: /etc/fstab
+        regexp: '^(\S+)(\s+/boot\s+)\S+(\s+.*)$'
+        replace: '{{ boot_dev.stdout | trim }}\2ext3\3'
+        backup: true
+
+    - name: Mount /boot and restore files
+      shell: |
+        mount /boot
+        rsync -av --delete {{ tmp_boot }}/ /boot/
+
+    - name: Rebuild initrd
+      shell: command -v mkinitrd && mkinitrd || dracut -f
+
+    - name: Reinstall GRUB2 (BIOS)
+      shell: |
+        disk="{{ (boot_dev.stdout | trim) | regex_replace('[0-9]+$','') }}"
+        grub2-install "$disk"
+        grub2-mkconfig -o /boot/grub2/grub.cfg
+
+    - name: Reboot system
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+        msg: "Rebooting after /boot migration to ext3"
+
+    - name: Get new UUID of /boot device (after reboot)
+      shell: blkid -s UUID -o value {{ boot_dev.stdout | trim }}
+      register: new_boot_uuid
+      changed_when: false
+      when: boot_used_uuid | bool
+
+    - name: Restore fstab /boot source back to UUID=... (keep ext3 + options)
+      replace:
+        path: /etc/fstab
+        regexp: '^\S+(\s+/boot\s+)ext3(\s+.*)$'
+        replace: 'UUID={{ new_boot_uuid.stdout | trim }}\1ext3\2'
+        backup: true
+      when: boot_used_uuid | bool
+
+    - name: Final verify
+      shell: |
+        echo "fstab /boot line:"
+        grep -w ' /boot ' /etc/fstab || true
+        echo "findmnt /boot:"
+        findmnt /boot || true
+      register: final_verify
+      changed_when: false
+
+    - debug:
+        var: final_verify.stdout_lines
+      changed_when: false

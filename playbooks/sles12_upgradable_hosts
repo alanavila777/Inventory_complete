@@ -1,1 +1,1 @@
-suse-12-test ansible_host=192.168.1.5
+suse-12 ansible_host=192.168.1.5
