@@ -1,6 +1,6 @@
 ---
 - name: Prechecks for SLES12 to SLES15 OS Upgrade
-  hosts: sles12_upgradable_hosts
+  hosts: all
   gather_facts: yes
   become: yes
 
