@@ -239,19 +239,19 @@
       when: new_disk.stdout != ""
  
     - name: Create logical volume 
-      shell: lvcreate -n my-lv -l 100%FREE leapvg
+      shell: lvcreate -n my-lv -l 100%FREE my-vg
       when: new_disk.stdout != ""
  
     - name: Create ext4 filesystem on new LV
       shell: mkfs.ext4 /dev/my-vg/my-lv
       when: new_disk.stdout != ""
- 
+
     - name: Final summary
       ansible.builtin.debug:
         msg:
           - "ReiserFS detected → disk added: {{ required_gb }} GB (based on TOTAL size + headroom)"
-          - "New disk: {{ new_disk_device }}"
-          - "Created LVM: /dev/{{ vg_name }}/{{ lv_name }}"
+          - "New disk: {{ new_disk }}"
+          - "Created LVM: /dev/my-vg/my-lv"
           - "Filesystem NOT created and NOT mounted."
       when: (reiserfs_df_gb.stdout | int) > 0
       changed_when: false
