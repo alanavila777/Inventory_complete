@@ -8,11 +8,10 @@
     current_date: "{{ ansible_facts['date_time']['date'] }}"
     output_file: /root/reiserfs_mounts.txt
     reiserfs_headroom_pct: 10
-    vg_name: "my-vg"
-    lv_name: "my-lv"
     vcenter_hostname: "192.168.1.102"
     vcenterUser: "svc_ansible@vsphere.local"
     vcenterPass: "Estratel.2025"
+    vm_datacenter: "lab.local"
     validate_certs: false
 
   tasks:
@@ -98,7 +97,7 @@
     - name: Extract folder and datacenter from path
       set_fact:    
         vm_folder: "{{ vm_path | regex_replace('^\\/(\\w*)', '\\1') }}"
-        vm_datacenter: "{{ TargetSnapVcenter }}"
+        vm_datacenter: "{{ vm_datacenter }}"
  
     - name: Create pre-OS Migrate snapshot
       vmware_guest_snapshot:
@@ -179,7 +178,6 @@
       changed_when: false
 
   ##### ADD NEW DISK AND LVM IF SCAN FINDS REISERFS #########
-   ##### ADD NEW DISK AND LVM IF SCAN FINDS REISERFS #########
 
     - name: Get disk info for VM
       vmware_guest_disk_info:
@@ -207,93 +205,47 @@
         disk:
           - size_gb: "{{ required_gb }}"
             datastore: "{{ vm_disk_info.guest_disk_info['0'].backing_datastore }}"
+            scsi_controller: 0
             unit_number: "{{ (vm_disk_info.guest_disk_info | dict2items)[-1].value.unit_number + 1 }}"
-            controller_number: 0
             state: present
             type: thin
-            scsi_controller: 0
             scsi_type: paravirtual
             disk_mode: persistent
-            label: "New Hard Disk"
         validate_certs: no
       delegate_to: localhost
       when:
         - (reiserfs_df_gb.stdout | int) > 0
         - (required_gb | int) > 0
 
-    - name: Capture disk list BEFORE rescan
-      ansible.builtin.shell: |
-        lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}' | sort
-      args:
-        executable: /bin/bash
-      register: disks_before
+    - name: Get latest disk device name
+      shell: lsblk -ndo NAME,TYPE | awk '$2 == "disk" {print $1}' | sort | tail -n1
+      register: new_disk
       changed_when: false
-      when: (reiserfs_df_gb.stdout | int) > 0
-
-    - name: Rescan SCSI buses
-      ansible.builtin.shell: |
-        for host in /sys/class/scsi_host/host*; do
-          echo "- - -" > "${host}/scan"
-        done
-      args:
-        executable: /bin/bash
+ 
+    - name: Trigger SCSI scan (host0)
+      shell: echo "- - -" > /sys/class/scsi_host/host0/scan
+ 
+    - name: Show available disks after scan
+      shell: fdisk -l | grep "Disk /dev/sd"
+      register: disk_list
       changed_when: false
-      when: (reiserfs_df_gb.stdout | int) > 0
-
-    - name: Wait for new disk to appear
-      ansible.builtin.pause:
-        seconds: 3
-      when: (reiserfs_df_gb.stdout | int) > 0
-
-    - name: Capture disk list AFTER rescan
-      ansible.builtin.shell: |
-        lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}' | sort
-      args:
-        executable: /bin/bash
-      register: disks_after
-      changed_when: false
-      when: (reiserfs_df_gb.stdout | int) > 0
-
-    - name: Detect newly added disk
-      ansible.builtin.set_fact:
-        new_disk_name: "{{ (disks_after.stdout_lines | difference(disks_before.stdout_lines))[0] }}"
-      when: (reiserfs_df_gb.stdout | int) > 0
-
-    - name: Fail if new disk cannot be detected
-      ansible.builtin.fail:
-        msg: >
-          Unable to detect the newly added disk.
-          BEFORE={{ disks_before.stdout_lines }},
-          AFTER={{ disks_after.stdout_lines }}
-      when:
-        - (reiserfs_df_gb.stdout | int) > 0
-        - new_disk_name | length == 0
-
-    - name: Set full device path
-      ansible.builtin.set_fact:
-        new_disk_device: "/dev/{{ new_disk_name }}"
-      when:
-        - (reiserfs_df_gb.stdout | int) > 0
-        - new_disk_name | length > 0
-
-    - name: Display detected disk
-      ansible.builtin.debug:
-        msg: "New disk detected: {{ new_disk_device }}"
-      when: (reiserfs_df_gb.stdout | int) > 0
-      changed_when: false
-
-    - name: Create Physical Volume
-      ansible.builtin.command: "pvcreate -ff -y {{ new_disk_device }}"
-      when: (reiserfs_df_gb.stdout | int) > 0
-
-    - name: Create Volume Group
-      ansible.builtin.command: "vgcreate {{ vg_name }} {{ new_disk_device }}"
-      when: (reiserfs_df_gb.stdout | int) > 0
-
-    - name: Create Logical Volume using all free space
-      ansible.builtin.command: "lvcreate -n {{ lv_name }} -l 100%FREE {{ vg_name }}"
-      when: (reiserfs_df_gb.stdout | int) > 0
-
+ 
+    - name: Create physical volume on new disk
+      shell: pvcreate /dev/{{ new_disk.stdout }}
+      when: new_disk.stdout != ""
+     
+    - name: Create volume group
+      shell: vgcreate my-vg /dev/{{ new_disk.stdout }}
+      when: new_disk.stdout != ""
+ 
+    - name: Create logical volume 
+      shell: lvcreate -n my-lv -l 100%FREE leapvg
+      when: new_disk.stdout != ""
+ 
+    - name: Create ext4 filesystem on new LV
+      shell: mkfs.ext4 /dev/my-vg/my-lv
+      when: new_disk.stdout != ""
+ 
     - name: Final summary
       ansible.builtin.debug:
         msg:
