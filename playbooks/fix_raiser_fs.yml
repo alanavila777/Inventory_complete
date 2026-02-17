@@ -10,7 +10,7 @@
     reiserfs_headroom_pct: 10
     vg_name: "my-vg"
     lv_name: "my-lv"
-    vcenter_hostname: "vcenter.lab.local"
+    vcenter_hostname: "192.168.1.102"
     vcenterUser: "svc_ansible@vsphere.local"
     vcenterPass: "Estratel.2025"
     validate_certs: false
@@ -214,6 +214,7 @@
             scsi_controller: 0
             scsi_type: paravirtual
             disk_mode: persistent
+            label: "New Hard Disk"
         validate_certs: no
       delegate_to: localhost
       when:
