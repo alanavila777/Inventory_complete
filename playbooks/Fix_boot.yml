@@ -7,7 +7,7 @@
   vars:
     current_date: "{{ ansible_facts['date_time']['date'] }}"
     tmp_boot: /tmp/boot
-    vcenter_hostname: "vcenter.lab.local"
+    vcenter_hostname: "192.168.1.102"
     vcenterUser: "svc_ansible@vsphere.local"
     vcenterPass: "Estratel.2025"
     validate_certs: false
