@@ -1,0 +1,304 @@
+---
+- name: Prechecks for SLES12 to SLES15 OS Upgrade
+  hosts: all
+  gather_facts: yes
+  become: yes
+
+  vars:
+    current_date: "{{ ansible_facts['date_time']['date'] }}"
+    output_file: /root/reiserfs_mounts.txt
+    reiserfs_headroom_pct: 10
+    vg_name: "my-vg"
+    lv_name: "my-lv"
+    vcenter_hostname: "vcenter.lab.local"
+    vcenterUser: "svc_ansible@vsphere.local"
+    vcenterPass: "Estratel.2025"
+    validate_certs: false
+
+  tasks:
+
+    - name: set host shortname
+      set_fact:
+        host_shortname: "{{ inventory_hostname | regex_replace('(^[^\\.]*).*', '\\1') | upper }}"
+
+################################### Set Default Vars ###################################
+
+    - name: set vm_snapped default
+      set_fact:
+        vm_snapped: false
+
+#################################### FIND VM(s) Folders, VCenter ####################################
+ 
+    - name: Verify potential Snapshot Path for VM in DSC2 VCenter
+      block:
+        - name: Set VCenterName
+          set_fact:
+            VCenterName: "{{ vcenter_hostname }}"
+     
+    - name: Look for VM
+      vmware_guest_find:
+        hostname: "{{ VCenterName }}"
+        username: "{{ vcenterUser }}"
+        password: "{{ vcenterPass}}"
+        name: "{{ host_shortname }}"
+        validate_certs: no
+      delegate_to: localhost
+      register: VM_Search
+      ignore_errors: true
+     
+    - name: Set VMFindFolderPath
+      set_fact:
+        VMFindFolderPath: "{{ VM_Search.folders[0] }}"
+      when: VM_Search is succeeded
+ 
+    - name: Set TargetSnapVcenter If Folder Found
+      set_fact:
+        TargetSnapVcenter: "{{ VCenterName }}"
+      when: VM_Search is succeeded
+ 
+    - name: Verify potential Snapshot Path for VM in DST2 VCenter
+      block:
+        - name: Set VCenterName
+          set_fact:
+            VCenterName: "{{vcenter_hostname}}"
+     
+    - name: Look for VM
+      vmware_guest_find:
+        hostname: "{{ VCenterName }}"
+        username: "{{ vcenterUser }}"
+        password: "{{ vcenterPass }}"
+        name: "{{ host_shortname }}"
+        validate_certs: no
+      delegate_to: localhost
+      register: VM_Search
+      ignore_errors: true
+     
+    - name: Set VMFindFolderPath
+      set_fact:
+        VMFindFolderPath: "{{ VM_Search.folders[0] }}"
+      when: VM_Search is succeeded
+ 
+    - name: Set TargetSnapVcenter If Folder Found
+      set_fact:
+        TargetSnapVcenter: "{{ VCenterName }}"
+      when: VM_Search is succeeded
+ 
+    - name: "List VM, VCenter, and VM Folder Path"
+      debug:
+        msg:
+        - "HostShortName = {{ host_shortname }}"
+        - "TargetSnapVcenter = {{ TargetSnapVcenter }}"
+        - "VMFindFolderPath = {{ VMFindFolderPath }}"
+ 
+####################################  SNAPSHOT VM(s) ################################################
+    - name: Set vm path variable
+      set_fact:
+        vm_path: "{{ VMFindFolderPath }}"
+           
+    - name: Extract folder and datacenter from path
+      set_fact:    
+        vm_folder: "{{ vm_path | regex_replace('^\\/(\\w*)', '\\1') }}"
+        vm_datacenter: "{{ TargetSnapVcenter }}"
+ 
+    - name: Create pre-OS Migrate snapshot
+      vmware_guest_snapshot:
+        hostname: "{{ TargetSnapVcenter }}"
+        username: "{{ vcenterUser }}"
+        password: "{{ vcenterPass }}"
+        datacenter: "{{ vm_datacenter }}"
+        folder: "/{{ vm_folder }}"
+        name: "{{ host_shortname }}"
+        state: present
+        snapshot_name: Ansible Pre-OS Boot Migration - {{ current_date }}
+        description: Before applying OS Boot Migration - {{ ansible_date_time.date }}
+        validate_certs: no
+      delegate_to: localhost
+      register: snap_json
+ 
+    - name: Validate VM snapshot
+      set_fact:
+        vm_snapped: "{{ snap_json.changed }}"
+
+################################ Scan Raiser FS ################################################
+    - name: Get ReiserFS filesystems using df -Th
+      ansible.builtin.shell: |
+        set -o pipefail
+        df -Th | awk '$2 == "reiserfs" {print $1, $7}'
+      args:
+        executable: /bin/bash
+      register: reiserfs_df
+      changed_when: false
+
+    - name: Remove output file if no ReiserFS filesystems are found
+      ansible.builtin.file:
+        path: "{{ output_file }}"
+        state: absent
+      when: reiserfs_df.stdout | length == 0
+
+    - name: Write device and mountpoint to output file
+      ansible.builtin.copy:
+        dest: "{{ output_file }}"
+        content: "{{ reiserfs_df.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      when: reiserfs_df.stdout | length > 0
+
+    - name: Get TOTAL ReiserFS size in bytes
+      ansible.builtin.shell: |
+        set -o pipefail
+        df -BG -T | awk '$2=="reiserfs"{gsub("G","",$3); sum+=$3} END{print sum+0}'
+      args:
+        executable: /bin/bash
+      register: reiserfs_df_gb
+      changed_when: false
+
+    - name: Set total ReiserFS size in GB
+      ansible.builtin.set_fact:
+        reiserfs_size_gb_total: "{{ reiserfs_df_gb.stdout | int }}"
+
+    - name: Calculate required disk size in GB (TOTAL + headroom)
+      ansible.builtin.set_fact:
+        required_gb: "{{ (((reiserfs_size_gb_total | int) * (100 + (reiserfs_headroom_pct | int))) // 100) | int }}"
+      when: (reiserfs_size_gb_total | int) > 0
+
+    - name: Display calculation details
+      ansible.builtin.debug:
+        msg:
+          - "ReiserFS filesystems found: {{ reiserfs_df.stdout_lines | length }}"
+          - "Total ReiserFS SIZE (GB): {{ reiserfs_size_gb_total }}"
+          - "Headroom percentage: {{ reiserfs_headroom_pct }}%"
+          - "Final required disk size (GB): {{ required_gb }}"
+      when: (reiserfs_size_gb_total | int) > 0
+      changed_when: false
+
+    - name: Display message if no ReiserFS detected
+      ansible.builtin.debug:
+        msg: "No ReiserFS filesystems were found on this system."
+      when: (reiserfs_df_gb.stdout | int) == 0
+      changed_when: false
+
+  ##### ADD NEW DISK AND LVM IF SCAN FINDS REISERFS #########
+   ##### ADD NEW DISK AND LVM IF SCAN FINDS REISERFS #########
+
+    - name: Get disk info for VM
+      vmware_guest_disk_info:
+        hostname: "{{ TargetSnapVcenter }}"
+        username: "{{ vcenterUser }}"
+        password: "{{ vcenterPass }}"
+        datacenter: "{{ vm_datacenter }}"
+        folder: "/{{ vm_folder }}"
+        name: "{{ host_shortname }}"
+        validate_certs: no
+      delegate_to: localhost
+      register: vm_disk_info
+      when:
+        - (reiserfs_df_gb.stdout | int) > 0
+        - (required_gb | int) > 0
+
+    - name: Add disk (size = required_gb)
+      vmware_guest_disk:
+        hostname: "{{ TargetSnapVcenter }}"
+        username: "{{ vcenterUser }}"
+        password: "{{ vcenterPass }}"
+        datacenter: "{{ vm_datacenter }}"
+        folder: "/{{ vm_folder }}"
+        name: "{{ host_shortname }}"
+        disk:
+          - size_gb: "{{ required_gb }}"
+            datastore: "{{ vm_disk_info.guest_disk_info['0'].backing_datastore }}"
+            unit_number: "{{ (vm_disk_info.guest_disk_info | dict2items)[-1].value.unit_number + 1 }}"
+            controller_number: 0
+            state: present
+            type: thin
+            scsi_controller: 0
+            scsi_type: paravirtual
+            disk_mode: persistent
+        validate_certs: no
+      delegate_to: localhost
+      when:
+        - (reiserfs_df_gb.stdout | int) > 0
+        - (required_gb | int) > 0
+
+    - name: Capture disk list BEFORE rescan
+      ansible.builtin.shell: |
+        lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}' | sort
+      args:
+        executable: /bin/bash
+      register: disks_before
+      changed_when: false
+      when: (reiserfs_df_gb.stdout | int) > 0
+
+    - name: Rescan SCSI buses
+      ansible.builtin.shell: |
+        for host in /sys/class/scsi_host/host*; do
+          echo "- - -" > "${host}/scan"
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+      when: (reiserfs_df_gb.stdout | int) > 0
+
+    - name: Wait for new disk to appear
+      ansible.builtin.pause:
+        seconds: 3
+      when: (reiserfs_df_gb.stdout | int) > 0
+
+    - name: Capture disk list AFTER rescan
+      ansible.builtin.shell: |
+        lsblk -dn -o NAME,TYPE | awk '$2=="disk"{print $1}' | sort
+      args:
+        executable: /bin/bash
+      register: disks_after
+      changed_when: false
+      when: (reiserfs_df_gb.stdout | int) > 0
+
+    - name: Detect newly added disk
+      ansible.builtin.set_fact:
+        new_disk_name: "{{ (disks_after.stdout_lines | difference(disks_before.stdout_lines))[0] }}"
+      when: (reiserfs_df_gb.stdout | int) > 0
+
+    - name: Fail if new disk cannot be detected
+      ansible.builtin.fail:
+        msg: >
+          Unable to detect the newly added disk.
+          BEFORE={{ disks_before.stdout_lines }},
+          AFTER={{ disks_after.stdout_lines }}
+      when:
+        - (reiserfs_df_gb.stdout | int) > 0
+        - new_disk_name | length == 0
+
+    - name: Set full device path
+      ansible.builtin.set_fact:
+        new_disk_device: "/dev/{{ new_disk_name }}"
+      when:
+        - (reiserfs_df_gb.stdout | int) > 0
+        - new_disk_name | length > 0
+
+    - name: Display detected disk
+      ansible.builtin.debug:
+        msg: "New disk detected: {{ new_disk_device }}"
+      when: (reiserfs_df_gb.stdout | int) > 0
+      changed_when: false
+
+    - name: Create Physical Volume
+      ansible.builtin.command: "pvcreate -ff -y {{ new_disk_device }}"
+      when: (reiserfs_df_gb.stdout | int) > 0
+
+    - name: Create Volume Group
+      ansible.builtin.command: "vgcreate {{ vg_name }} {{ new_disk_device }}"
+      when: (reiserfs_df_gb.stdout | int) > 0
+
+    - name: Create Logical Volume using all free space
+      ansible.builtin.command: "lvcreate -n {{ lv_name }} -l 100%FREE {{ vg_name }}"
+      when: (reiserfs_df_gb.stdout | int) > 0
+
+    - name: Final summary
+      ansible.builtin.debug:
+        msg:
+          - "ReiserFS detected → disk added: {{ required_gb }} GB (based on TOTAL size + headroom)"
+          - "New disk: {{ new_disk_device }}"
+          - "Created LVM: /dev/{{ vg_name }}/{{ lv_name }}"
+          - "Filesystem NOT created and NOT mounted."
+      when: (reiserfs_df_gb.stdout | int) > 0
+      changed_when: false

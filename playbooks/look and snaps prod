@@ -1,0 +1,113 @@
+---
+- name: Prechecks for SLES12 to SLES15 OS Upgrade
+  hosts: sles12_upgradable_hosts
+  gather_facts: yes
+  become: yes
+
+  vars:
+    current_date: "{{ ansible_facts['date_time']['date'] }}"
+    tmp_boot: /tmp/boot
+
+  tasks:
+
+    - name: set host shortname
+      set_fact:
+        host_shortname: "{{ inventory_hostname | regex_replace('(^[^\\.]*).*', '\\1') | upper }}"
+
+################################### Set Default Vars ###################################
+
+    - name: set vm_snapped default
+      set_fact:
+        vm_snapped: false
+
+#################################### FIND VM(s) Folders, VCenter ####################################
+ 
+    - name: Verify potential Snapshot Path for VM in DSC2 VCenter
+      block:
+        - name: Set VCenterName
+          set_fact:
+            VCenterName: "{{ lookup('vars', 'vcenterDSC2') }}"
+     
+    - name: Look for VM
+      vmware_guest_find:
+        hostname: "{{ VCenterName }}"
+        username: "{{ lookup('vars', 'vcenterUser') }}"
+        password: "{{ lookup('vars', 'vcenterPass') }}"
+        name: "{{ host_shortname }}"
+        validate_certs: no
+      delegate_to: localhost
+      register: VM_Search
+      ignore_errors: true
+     
+    - name: Set VMFindFolderPath
+      set_fact:
+        VMFindFolderPath: "{{ VM_Search | json_query('folders[0]') }}"
+      when: VM_Search is succeeded
+ 
+    - name: Set TargetSnapVcenter If Folder Found
+      set_fact:
+        TargetSnapVcenter: "{{ VCenterName }}"
+      when: VM_Search is succeeded
+ 
+    - name: Verify potential Snapshot Path for VM in DST2 VCenter
+      block:
+        - name: Set VCenterName
+          set_fact:
+            VCenterName: "{{ lookup('vars', 'vcenterDST2') }}"
+     
+    - name: Look for VM
+      vmware_guest_find:
+        hostname: "{{ VCenterName }}"
+        username: "{{ lookup('vars', 'vcenterUser') }}"
+        password: "{{ lookup('vars', 'vcenterPass') }}"
+        name: "{{ host_shortname }}"
+        validate_certs: no
+      delegate_to: localhost
+      register: VM_Search
+      ignore_errors: true
+     
+    - name: Set VMFindFolderPath
+      set_fact:
+        VMFindFolderPath: "{{ VM_Search | json_query('folders[0]') }}"
+      when: VM_Search is succeeded
+ 
+    - name: Set TargetSnapVcenter If Folder Found
+      set_fact:
+        TargetSnapVcenter: "{{ VCenterName }}"
+      when: VM_Search is succeeded
+ 
+    - name: "List VM, VCenter, and VM Folder Path"
+      debug:
+        msg:
+        - "HostShortName = {{ host_shortname }}"
+        - "TargetSnapVcenter = {{ TargetSnapVcenter }}"
+        - "VMFindFolderPath = {{ VMFindFolderPath }}"
+ 
+####################################  SNAPSHOT VM(s) ################################################
+    - name: Set vm path variable
+      set_fact:
+        vm_path: "{{ VMFindFolderPath }}"
+           
+    - name: Extract folder and datacenter from path
+      set_fact:    
+        vm_folder: "{{ vm_path | regex_replace('^\\/(\\w*)', '\\1') }}"
+        vm_datacenter: "{{ TargetSnapVcenter }}"
+ 
+    - name: Create pre-OS Migrate snapshot
+      vmware_guest_snapshot:
+        hostname: "{{ TargetSnapVcenter }}"
+        username: "{{ lookup('vars', 'vcenterUser') }}"
+        password: "{{ lookup('vars', 'vcenterPass') }}"
+        datacenter: "{{ vm_datacenter }}"
+        folder: "/{{ vm_folder }}"
+        name: "{{ host_shortname }}"
+        state: present
+        snapshot_name: Ansible Pre-OS Boot Migration - {{ current_date }}
+        description: Before applying OS Boot Migration - {{ ansible_date_time.date }}
+        validate_certs: no
+      delegate_to: localhost
+      register: snap_json
+ 
+    - name: Validate VM snapshot
+      set_fact:
+        vm_snapped: "{{ snap_json | json_query('changed') }}"
