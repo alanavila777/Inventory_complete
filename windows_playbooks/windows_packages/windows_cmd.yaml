@@ -9,7 +9,7 @@
         content: ""
         dest: "/root/host-inventory-list/Windows_ServerApps.csv"
         force: yes
-      delegate_to: localhost
+      delegate_to: olam
       run_once: true
 
     - name: Create the windows server names file at the start of the play
@@ -17,7 +17,7 @@
         content: ""
         dest: "/root/host-inventory-list/all_windows_server_names.txt"
         force: yes
-      delegate_to: localhost
+      delegate_to: olam
       run_once: true
 
     - name: Write aggregated Windows server names
@@ -25,7 +25,7 @@
         path: /root/host-inventory-list/all_windows_server_names.txt
         line: "{{ inventory_hostname }}"
         insertafter: EOF
-      delegate_to: localhost
+      delegate_to: olam
 
     - name: Get the installed Softwares
       ansible.windows.win_shell: |
@@ -57,4 +57,4 @@
         block: "{{ installed_softwares.stdout }}"
         marker: ""
         insertafter: EOF
-      delegate_to: localhost
+      delegate_to: olam
