@@ -1,6 +1,6 @@
 ---
 - name: Gather Installed Softwares from Windows Hosts
-  hosts: windows
+  hosts: all
   gather_facts: no
 
   tasks:
