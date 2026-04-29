@@ -1,0 +1,362 @@
+---
+- name: Rescue migration workflow (ReiserFS -> ext3) - copy txt to /root, ensure mount dirs
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    # En rescue: primero tomamos el txt desde el root del OS montado en /mnt
+    old_mnt: "/mnt"
+    new_mnt: "/mnt2"
+    new_lv: "/dev/migvg/miglv"
+
+    # Source del txt dentro del OS montado (ruta típica)
+    input_src_in_old_root: "/mnt/root/reiserfs_mounts.txt"
+
+    # Working input (en rescue root)
+    input_file: "/root/reiserfs_mounts.txt"
+
+    fstab_path: "/mnt/etc/fstab"
+
+    rsync1_excludes:
+      - "--exclude=lastlog"
+      - "--exclude=faillog"
+      - "--exclude=tallylog"
+
+    dry_run: "{{ dry_run | default(false) | bool }}"
+
+  tasks:
+    - name: Safety - NEW_MNT must NOT be inside OLD_MNT
+      ansible.builtin.fail:
+        msg: "ERROR: NEW_MNT ({{ new_mnt }}) is under OLD_MNT ({{ old_mnt }}). Use a separate path (e.g. /mnt2)."
+      when: new_mnt.startswith(old_mnt + "/") or new_mnt == old_mnt
+
+    - name: Verify required commands exist
+      ansible.builtin.command: "bash -lc 'command -v {{ item }} >/dev/null 2>&1'"
+      loop:
+        - awk
+        - grep
+        - findmnt
+        - mount
+        - umount
+        - rsync
+        - mkfs.ext3
+        - lsblk
+        - blkid
+        - date
+        - sort
+        - cut
+        - mkdir
+        - cp
+      changed_when: false
+
+    # ----------------------------
+    # Mount ROOT first using device from INPUT_FILE if it already exists in rescue
+    # If not, we still can mount root only if you pass the file already present.
+    # In practice: you usually already generated /root/reiserfs_mounts.txt earlier.
+    # ----------------------------
+    - name: Check if working input file exists in rescue (/root)
+      ansible.builtin.stat:
+        path: "{{ input_file }}"
+      register: st_working_input
+
+    - name: Fail if working input missing (needed to find root device)
+      ansible.builtin.fail:
+        msg: "ERROR: {{ input_file }} not found. Put it in /root first (or generate it) so we can mount '/' first."
+      when: not st_working_input.stat.exists
+
+    - name: Extract root device from working input file (mountpoint '/')
+      ansible.builtin.command: "bash -lc \"awk '$2==\\\"/\\\"{print $1; exit}' {{ input_file }}\""
+      register: rootdev
+      changed_when: false
+
+    - name: Fail if '/' entry not found
+      ansible.builtin.fail:
+        msg: "ERROR: '/' entry not found in {{ input_file }}"
+      when: (rootdev.stdout | trim) == ""
+
+    - name: Ensure OLD_MNT directory exists
+      ansible.builtin.file:
+        path: "{{ old_mnt }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check if OLD_MNT already mounted
+      ansible.builtin.command: "bash -lc 'findmnt -rn {{ old_mnt }} >/dev/null 2>&1'"
+      register: chk_old_root
+      changed_when: false
+      failed_when: false
+
+    - name: Mount ROOT first (rootdev -> OLD_MNT)
+      ansible.builtin.command: "mount '{{ rootdev.stdout | trim }}' '{{ old_mnt }}'"
+      when: chk_old_root.rc != 0 and not dry_run
+
+    - name: DRY_RUN - Mount ROOT first
+      ansible.builtin.debug:
+        msg: "[DRY_RUN] mount '{{ rootdev.stdout | trim }}' '{{ old_mnt }}'"
+      when: chk_old_root.rc != 0 and dry_run
+
+    - name: Verify old root mounted
+      ansible.builtin.command: "bash -lc 'findmnt -rn {{ old_mnt }} >/dev/null 2>&1'"
+      changed_when: false
+
+    # ----------------------------
+    # Copy ONLY reiserfs_mounts.txt from /mnt/root -> /root (rescue)
+    # ----------------------------
+    - name: Stat source txt inside mounted old root
+      ansible.builtin.stat:
+        path: "{{ input_src_in_old_root }}"
+      register: st_src_txt
+
+    - name: Copy txt from old root to rescue (/root) - overwrite
+      ansible.builtin.command: "cp -a '{{ input_src_in_old_root }}' '{{ input_file }}'"
+      when: st_src_txt.stat.exists and not dry_run
+
+    - name: DRY_RUN - Copy txt from old root to rescue
+      ansible.builtin.debug:
+        msg: "[DRY_RUN] cp -a '{{ input_src_in_old_root }}' '{{ input_file }}'"
+      when: st_src_txt.stat.exists and dry_run
+
+    - name: Fail if source txt not found in /mnt/root
+      ansible.builtin.fail:
+        msg: "ERROR: source txt not found at {{ input_src_in_old_root }} (cannot copy to /root)."
+      when: not st_src_txt.stat.exists
+
+    # ----------------------------
+    # Ensure ALL mountpoint directories exist under /mnt before mounting them
+    # Example: /var -> /mnt/var, /var/log -> /mnt/var/log, etc.
+    # ----------------------------
+    - name: Ensure mountpoint directories exist under OLD_MNT
+      ansible.builtin.command: >-
+        bash -lc '
+          set -euo pipefail
+          while read -r dev mp; do
+            [[ -z "${dev:-}" || -z "${mp:-}" ]] && continue
+            [[ "$mp" == "/" ]] && continue
+            mkdir -p "{{ old_mnt }}${mp}"
+          done < "{{ input_file }}"
+        '
+      when: not dry_run
+
+    - name: DRY_RUN - Ensure mountpoint directories exist under OLD_MNT
+      ansible.builtin.debug:
+        msg: "[DRY_RUN] would mkdir -p for all mountpoints under {{ old_mnt }} from {{ input_file }}"
+      when: dry_run
+
+    # ----------------------------
+    # Mount all old filesystems (excluding '/')
+    # ----------------------------
+    - name: Mount all old filesystems (excluding '/')
+      ansible.builtin.command: >-
+        bash -lc '
+          set -euo pipefail
+          while read -r dev mp; do
+            [[ -z "${dev:-}" || -z "${mp:-}" ]] && continue
+            [[ "$mp" == "/" ]] && continue
+            tgt="{{ old_mnt }}${mp}"
+            if findmnt -rn "$tgt" >/dev/null 2>&1; then
+              continue
+            fi
+            mount "$dev" "$tgt"
+          done < "{{ input_file }}"
+        '
+      when: not dry_run
+
+    - name: If /tmp is listed, ensure /mnt/tmp is mounted
+      ansible.builtin.command: >-
+        bash -lc '
+          if awk '\''$2=="/tmp"{found=1} END{exit(found?0:1)}'\'' "{{ input_file }}"; then
+            mkdir -p "{{ old_mnt }}/tmp"
+            findmnt -rn "{{ old_mnt }}/tmp" >/dev/null 2>&1 || exit 7
+          fi
+        '
+      register: chk_tmp
+      changed_when: false
+      failed_when: chk_tmp.rc not in [0]
+      when: not dry_run
+
+    # ----------------------------
+    # Mount new LV
+    # ----------------------------
+    - name: Ensure NEW_MNT directory exists
+      ansible.builtin.file:
+        path: "{{ new_mnt }}"
+        state: directory
+        mode: "0755"
+
+    - name: Check if NEW_MNT already mounted
+      ansible.builtin.command: "bash -lc 'findmnt -rn {{ new_mnt }} >/dev/null 2>&1'"
+      register: chk_new
+      changed_when: false
+      failed_when: false
+
+    - name: Mount new LV (NEW_LV -> NEW_MNT)
+      ansible.builtin.command: "mount '{{ new_lv }}' '{{ new_mnt }}'"
+      when: chk_new.rc != 0 and not dry_run
+
+    - name: Verify new mounted
+      ansible.builtin.command: "bash -lc 'findmnt -rn {{ new_mnt }} >/dev/null 2>&1'"
+      changed_when: false
+
+    # ----------------------------
+    # rsync old -> new (with excludes)
+    # ----------------------------
+    - name: Rsync old -> new (with excludes)
+      ansible.builtin.command: >-
+        rsync -av --delete {{ rsync1_excludes | join(' ') }} '{{ old_mnt }}/' '{{ new_mnt }}/'
+      when: not dry_run
+
+    # ----------------------------
+    # Unmount everything under OLD_MNT excluding NEW_MNT
+    # ----------------------------
+    - name: Collect mount targets under OLD_MNT (deepest first), excluding NEW_MNT
+      ansible.builtin.command: >-
+        bash -lc '
+          findmnt -rn -o TARGET \
+            | awk -v base="{{ old_mnt }}" "$0 ~ \"^\"base {print $0}" \
+            | awk -v ex="{{ new_mnt }}" "$0==ex || index($0, ex\"/\")==1 {next} {print length, $0}" \
+            | sort -rn \
+            | cut -d" " -f2-
+        '
+      register: old_targets
+      changed_when: false
+
+    - name: Unmount old tree targets (excluding NEW_MNT)
+      ansible.builtin.command: "umount '{{ item }}'"
+      loop: "{{ old_targets.stdout_lines }}"
+      when: not dry_run
+      failed_when: false
+
+    - name: Verify no leftover mounts under OLD_MNT (excluding NEW_MNT)
+      ansible.builtin.command: >-
+        bash -lc '
+          leftover="$(findmnt -rn -o TARGET | grep -E "^{{ old_mnt }}(/|$)" | grep -vE "^{{ new_mnt }}(/|$)" || true)"
+          test -z "$leftover"
+        '
+      changed_when: false
+
+    # ----------------------------
+    # Format listed devices to ext3 (verify reiserfs first)
+    # ----------------------------
+    - name: Verify each listed device is NOT mounted anywhere
+      ansible.builtin.command: >-
+        bash -lc '
+          while read -r dev mp; do
+            [[ -z "${dev:-}" || -z "${mp:-}" ]] && continue
+            if findmnt -rn -S "$dev" >/dev/null 2>&1; then
+              echo "ERROR: device still mounted: $dev"
+              findmnt -rn -S "$dev"
+              exit 9
+            fi
+          done < "{{ input_file }}"
+        '
+      changed_when: false
+
+    - name: Verify each device is reiserfs before formatting (blkid/lsblk)
+      ansible.builtin.command: >-
+        bash -lc '
+          while read -r dev mp; do
+            [[ -z "${dev:-}" || -z "${mp:-}" ]] && continue
+            t="$(blkid -o value -s TYPE "$dev" 2>/dev/null || true)"
+            if [[ -z "$t" ]]; then t="$(lsblk -no FSTYPE "$dev" 2>/dev/null || true)"; fi
+            [[ "$t" == "reiserfs" ]] || { echo "ERROR: $dev not reiserfs (detected: ${t:-unknown})"; exit 8; }
+          done < "{{ input_file }}"
+        '
+      changed_when: false
+
+    - name: mkfs.ext3 ONLY on listed devices
+      ansible.builtin.command: >-
+        bash -lc '
+          while read -r dev mp; do
+            [[ -z "${dev:-}" || -z "${mp:-}" ]] && continue
+            mkfs.ext3 -F "$dev"
+          done < "{{ input_file }}"
+        '
+      when: not dry_run
+
+    # ----------------------------
+    # Remount old + ensure new mounted + rsync back
+    # ----------------------------
+    - name: Mount ROOT again (if needed)
+      ansible.builtin.command: "bash -lc 'findmnt -rn {{ old_mnt }} >/dev/null 2>&1 || mount {{ rootdev.stdout | trim }} {{ old_mnt }}'"
+      when: not dry_run
+      changed_when: false
+
+    - name: Ensure mountpoint directories exist again (post-format)
+      ansible.builtin.command: >-
+        bash -lc '
+          while read -r dev mp; do
+            [[ -z "${dev:-}" || -z "${mp:-}" ]] && continue
+            [[ "$mp" == "/" ]] && continue
+            mkdir -p "{{ old_mnt }}${mp}"
+          done < "{{ input_file }}"
+        '
+      when: not dry_run
+
+    - name: Mount all old filesystems again (excluding '/')
+      ansible.builtin.command: >-
+        bash -lc '
+          set -euo pipefail
+          while read -r dev mp; do
+            [[ -z "${dev:-}" || -z "${mp:-}" ]] && continue
+            [[ "$mp" == "/" ]] && continue
+            tgt="{{ old_mnt }}${mp}"
+            if findmnt -rn "$tgt" >/dev/null 2>&1; then
+              continue
+            fi
+            mount "$dev" "$tgt"
+          done < "{{ input_file }}"
+        '
+      when: not dry_run
+
+    - name: Ensure NEW_MNT still mounted (fix)
+      ansible.builtin.command: "bash -lc 'findmnt -rn {{ new_mnt }} >/dev/null 2>&1 || mount {{ new_lv }} {{ new_mnt }}'"
+      when: not dry_run
+      changed_when: false
+
+    - name: Rsync new -> old
+      ansible.builtin.command: "rsync -av --delete '{{ new_mnt }}/' '{{ old_mnt }}/'"
+      when: not dry_run
+
+    # ----------------------------
+    # Patch fstab
+    # ----------------------------
+    - name: Stat fstab inside old root
+      ansible.builtin.stat:
+        path: "{{ fstab_path }}"
+      register: st_fstab
+
+    - name: Patch fstab (reiserfs->ext3 only for mountpoints in input), with timestamp backup
+      ansible.builtin.command: >-
+        bash -lc '
+          set -euo pipefail
+          F="{{ fstab_path }}"
+          ts="$(date +%Y%m%d_%H%M%S)"
+          bak="${F}.bak.${ts}"
+
+          cp -a "$F" "$bak"
+
+          mplist="$(awk "{print \\$2}" "{{ input_file }}" | awk "NF" | paste -sd"|" -)"
+          [[ -n "$mplist" ]] || { echo "WARNING: no mountpoints found, skipping fstab patch"; exit 0; }
+
+          awk -v re="^(${mplist})$" "
+            BEGIN{OFS=\"\t\"}
+            /^[[:space:]]*#/ {print; next}
+            /^[[:space:]]*$/ {print; next}
+            {
+              if (\\$2 ~ re && \\$3 == \"reiserfs\") { \\$3 = \"ext3\" }
+              print
+            }" "$F" > "${F}.tmp"
+
+          mv "${F}.tmp" "$F"
+          echo "fstab patched. Backup: $bak"
+        '
+      when: st_fstab.stat.exists and not dry_run
+
+    - name: Final notes
+      ansible.builtin.debug:
+        msg:
+          - "DONE."
+          - "Verify mounts and fstab inside old root:"
+          - "  findmnt -rn | egrep \"^{{ old_mnt }}(/|$)|^{{ new_mnt }}(/|$)\""
+          - "  vi {{ fstab_path }}"
