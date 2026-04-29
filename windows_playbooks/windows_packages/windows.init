@@ -1,0 +1,7 @@
+[physical-hosts]
+win01 ansible_host=192.168.1.50
+win02 ansible_host=192.168.1.51
+
+[PA-tag-hosts]
+win03 ansible_host=192.168.1.52
+win04 ansible_host=192.168.1.53
