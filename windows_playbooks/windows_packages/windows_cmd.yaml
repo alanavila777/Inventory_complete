@@ -49,7 +49,6 @@
           }
         }
       register: installed_softwares
-      ignore_unreachable: yes
       changed_when: false
 
     - name: Append installed softwares to file in /root/host-inventory-list/
