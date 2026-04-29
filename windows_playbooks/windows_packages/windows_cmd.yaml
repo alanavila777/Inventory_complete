@@ -1,6 +1,6 @@
 ---
 - name: Gather Installed Softwares from Windows Hosts
-  hosts: all
+  hosts: physical-hosts:PA-tag-hosts
   gather_facts: no
 
   tasks:
