@@ -39,6 +39,42 @@
         > {{ precheck_dir }}/ss.{{ host_id }} 2>/dev/null || true
       changed_when: false
 
+    - name: Save running Docker containers when present
+      ansible.builtin.shell: |
+        OUT="{{ precheck_dir }}/docker_containers.{{ host_id }}"
+        rm -f "$OUT"
+
+        if ! command -v docker >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        if ! docker info >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        docker ps --format '{{ "{{" }}.ID{{ "}}" }} {{ "{{" }}.Names{{ "}}" }}' > "$OUT"
+
+        if [ ! -s "$OUT" ]; then
+          rm -f "$OUT"
+        fi
+      changed_when: false
+
+    - name: Save running Podman containers when present
+      ansible.builtin.shell: |
+        OUT="{{ precheck_dir }}/podman_containers.{{ host_id }}"
+        rm -f "$OUT"
+
+        if ! command -v podman >/dev/null 2>&1; then
+          exit 0
+        fi
+
+        podman ps --format '{{ "{{" }}.ID{{ "}}" }} {{ "{{" }}.Names{{ "}}" }}' > "$OUT" 2>/dev/null || true
+
+        if [ ! -s "$OUT" ]; then
+          rm -f "$OUT"
+        fi
+      changed_when: false
+
     - name: Install latest UEK kernel on OL8/OL9 using dnf
       ansible.builtin.shell: |
         dnf install -y kernel-uek
@@ -60,7 +96,10 @@
         {{ precheck_dir }}/mount.{{ host_id }} \
         {{ precheck_dir }}/ps.{{ host_id }} \
         {{ precheck_dir }}/netstat.{{ host_id }} \
-        {{ precheck_dir }}/ss.{{ host_id }}
+        {{ precheck_dir }}/ss.{{ host_id }} \
+        {{ precheck_dir }}/docker_containers.{{ host_id }} \
+        {{ precheck_dir }}/podman_containers.{{ host_id }} \
+        2>/dev/null || true
       register: precheck_files
       changed_when: false
 

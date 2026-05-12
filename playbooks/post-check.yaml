@@ -110,9 +110,76 @@
       changed_when: false
       failed_when: false
 
+    - name: Check Docker containers from pre-check
+      ansible.builtin.shell: |
+        PRE_DOCKER="{{ precheck_dir }}/docker_containers.{{ host_id }}"
+
+        echo "===== Docker containers ====="
+
+        if [ ! -f "$PRE_DOCKER" ]; then
+          echo "No running Docker containers recorded during pre-check, skipping"
+          exit 0
+        fi
+
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "Docker containers were recorded during pre-check, but docker command is not available now"
+          exit 0
+        fi
+
+        if ! docker info >/dev/null 2>&1; then
+          echo "Docker containers were recorded during pre-check, but Docker daemon is not available now"
+          exit 0
+        fi
+
+        while read cid cname; do
+          [ -z "$cid" ] && continue
+
+          if docker ps --format '{{ "{{" }}.ID{{ "}}" }} {{ "{{" }}.Names{{ "}}" }}' | awk -v id="$cid" -v name="$cname" '$1 == id || $2 == name { found=1 } END { exit !found }'; then
+            echo "$cname is running"
+          else
+            echo "$cname is not running, trying to start"
+            docker start "$cid" 2>&1 || docker start "$cname" 2>&1 || true
+          fi
+        done < "$PRE_DOCKER"
+      register: docker_check_summary
+      changed_when: false
+      failed_when: false
+
+    - name: Check Podman containers from pre-check
+      ansible.builtin.shell: |
+        PRE_PODMAN="{{ precheck_dir }}/podman_containers.{{ host_id }}"
+
+        echo "===== Podman containers ====="
+
+        if [ ! -f "$PRE_PODMAN" ]; then
+          echo "No running Podman containers recorded during pre-check, skipping"
+          exit 0
+        fi
+
+        if ! command -v podman >/dev/null 2>&1; then
+          echo "Podman containers were recorded during pre-check, but podman command is not available now"
+          exit 0
+        fi
+
+        while read cid cname; do
+          [ -z "$cid" ] && continue
+
+          if podman ps --format '{{ "{{" }}.ID{{ "}}" }} {{ "{{" }}.Names{{ "}}" }}' | awk -v id="$cid" -v name="$cname" '$1 == id || $2 == name { found=1 } END { exit !found }'; then
+            echo "$cname is running"
+          else
+            echo "$cname is not running, trying to start"
+            podman start "$cid" 2>&1 || podman start "$cname" 2>&1 || true
+          fi
+        done < "$PRE_PODMAN"
+      register: podman_check_summary
+      changed_when: false
+      failed_when: false
+
     - name: Show post-check summary
       ansible.builtin.debug:
         msg:
           - "{{ mount_check_summary.stdout_lines }}"
           - "{{ service_check_summary.stdout_lines }}"
           - "{{ process_check_summary.stdout_lines }}"
+          - "{{ docker_check_summary.stdout_lines }}"
+          - "{{ podman_check_summary.stdout_lines }}"
