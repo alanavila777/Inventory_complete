@@ -29,9 +29,6 @@
           exit 1
         fi
 
-        echo "===== Missing mounts ====="
-        found_missing=0
-
         awk '{print $3}' "$PRE_MOUNT" \
         | egrep -v '^/(proc|sys|dev|run|boot|var/lib/docker|var/lib/containers)($|/)' \
         | sort -u \
@@ -64,18 +61,14 @@
           exit 1
         fi
 
-        echo "===== Enabled services not active after reboot ====="
-
         while read svc; do
           [ -z "$svc" ] && continue
 
           case "$svc" in
             *@.service)
-              echo "$svc - template service skipped"
               continue
               ;;
             dbus-org.*.service)
-              echo "$svc - dbus alias service skipped"
               continue
               ;;
           esac
@@ -88,17 +81,24 @@
             exec_status=$(systemctl show "$svc" -p ExecMainStatus --value 2>/dev/null || true)
 
             if [ "$svc_type" = "oneshot" ] && [ "$result" = "success" ] && [ "$exec_status" = "0" ]; then
-              echo "$svc - type: oneshot, state: $state, result: $result, exec status: $exec_status, OK"
               continue
             fi
 
-            echo "$svc - current state: $state"
-            echo "$svc - type: $svc_type, result: $result, exec status: $exec_status"
+            if [ "$svc_type" = "dbus" ] && [ "$result" = "success" ]; then
+              continue
+            fi
 
-            echo "Trying to start $svc"
-            systemctl start "$svc" 2>&1 && \
-              echo "$svc started successfully" || \
-              echo "$svc failed to start"
+            start_output=$(systemctl start "$svc" 2>&1)
+            start_rc=$?
+
+            if [ "$start_rc" -ne 0 ]; then
+              echo "FAILED: $svc"
+              echo "  state: $state"
+              echo "  type: $svc_type"
+              echo "  result: $result"
+              echo "  exec status: $exec_status"
+              echo "  start output: $start_output"
+            fi
           fi
         done < "$PRE_SERVICES"
       register: service_check_summary
@@ -118,7 +118,6 @@
         awk '{$2=""; $3=""; $4=""; $5=""; $6=""; $7=""; $8=""; print $0}' "$PRE_PS" | sort -u > "$TMP_DIR/ps_before"
         ps -ef | awk '{$2=""; $3=""; $4=""; $5=""; $6=""; $7=""; $8=""; print $0}' | sort -u > "$TMP_DIR/ps_after"
 
-        echo "===== Processes missing after reboot - review manually ====="
         comm -23 "$TMP_DIR/ps_before" "$TMP_DIR/ps_after"
       register: process_check_summary
       changed_when: false
@@ -128,20 +127,17 @@
       ansible.builtin.shell: |
         PRE_DOCKER="{{ precheck_dir }}/docker_containers.{{ host_id }}"
 
-        echo "===== Docker containers ====="
-
         if [ ! -f "$PRE_DOCKER" ]; then
-          echo "No running Docker containers recorded during pre-check, skipping"
           exit 0
         fi
 
         if ! command -v docker >/dev/null 2>&1; then
-          echo "Docker containers were recorded during pre-check, but docker command is not available now"
+          echo "FAILED: Docker containers were recorded during pre-check, but docker command is not available now"
           exit 0
         fi
 
         if ! docker info >/dev/null 2>&1; then
-          echo "Docker containers were recorded during pre-check, but Docker daemon is not available now"
+          echo "FAILED: Docker containers were recorded during pre-check, but Docker daemon is not available now"
           exit 0
         fi
 
@@ -149,10 +145,16 @@
           [ -z "$cid" ] && continue
 
           if docker ps --format '{{ "{{" }}.ID{{ "}}" }} {{ "{{" }}.Names{{ "}}" }}' | awk -v id="$cid" -v name="$cname" '$1 == id || $2 == name { found=1 } END { exit !found }'; then
-            echo "$cname is running"
+            true
           else
-            echo "$cname is not running, trying to start"
-            docker start "$cid" 2>&1 || docker start "$cname" 2>&1 || true
+            start_output=$(docker start "$cid" 2>&1 || docker start "$cname" 2>&1)
+            start_rc=$?
+
+            if [ "$start_rc" -ne 0 ]; then
+              echo "FAILED: Docker container $cname is not running and could not be started"
+              echo "  id: $cid"
+              echo "  start output: $start_output"
+            fi
           fi
         done < "$PRE_DOCKER"
       register: docker_check_summary
@@ -163,15 +165,12 @@
       ansible.builtin.shell: |
         PRE_PODMAN="{{ precheck_dir }}/podman_containers.{{ host_id }}"
 
-        echo "===== Podman containers ====="
-
         if [ ! -f "$PRE_PODMAN" ]; then
-          echo "No running Podman containers recorded during pre-check, skipping"
           exit 0
         fi
 
         if ! command -v podman >/dev/null 2>&1; then
-          echo "Podman containers were recorded during pre-check, but podman command is not available now"
+          echo "FAILED: Podman containers were recorded during pre-check, but podman command is not available now"
           exit 0
         fi
 
@@ -179,21 +178,43 @@
           [ -z "$cid" ] && continue
 
           if podman ps --format '{{ "{{" }}.ID{{ "}}" }} {{ "{{" }}.Names{{ "}}" }}' | awk -v id="$cid" -v name="$cname" '$1 == id || $2 == name { found=1 } END { exit !found }'; then
-            echo "$cname is running"
+            true
           else
-            echo "$cname is not running, trying to start"
-            podman start "$cid" 2>&1 || podman start "$cname" 2>&1 || true
+            start_output=$(podman start "$cid" 2>&1 || podman start "$cname" 2>&1)
+            start_rc=$?
+
+            if [ "$start_rc" -ne 0 ]; then
+              echo "FAILED: Podman container $cname is not running and could not be started"
+              echo "  id: $cid"
+              echo "  start output: $start_output"
+            fi
           fi
         done < "$PRE_PODMAN"
       register: podman_check_summary
       changed_when: false
       failed_when: false
 
-    - name: Show post-check summary
+    - name: Show mount failures
       ansible.builtin.debug:
-        msg:
-          - "{{ mount_check_summary.stdout_lines }}"
-          - "{{ service_check_summary.stdout_lines }}"
-          - "{{ process_check_summary.stdout_lines }}"
-          - "{{ docker_check_summary.stdout_lines }}"
-          - "{{ podman_check_summary.stdout_lines }}"
+        var: mount_check_summary.stdout_lines
+      when: mount_check_summary.stdout | length > 0
+
+    - name: Show service failures
+      ansible.builtin.debug:
+        var: service_check_summary.stdout_lines
+      when: service_check_summary.stdout | length > 0
+
+    - name: Show process differences
+      ansible.builtin.debug:
+        var: process_check_summary.stdout_lines
+      when: process_check_summary.stdout | length > 0
+
+    - name: Show Docker failures
+      ansible.builtin.debug:
+        var: docker_check_summary.stdout_lines
+      when: docker_check_summary.stdout | length > 0
+
+    - name: Show Podman failures
+      ansible.builtin.debug:
+        var: podman_check_summary.stdout_lines
+      when: podman_check_summary.stdout | length > 0
