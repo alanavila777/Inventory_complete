@@ -6,12 +6,15 @@
 
   vars:
     reboot_wait_host: "{{ ansible_host | default(inventory_hostname) }}"
+    reboot_down_timeout: 300
+    reboot_up_timeout: 1800
+    ssh_stabilize_timeout: 600
 
   tasks:
 
     - name: Trigger reboot
       ansible.builtin.shell: |
-        shutdown -r +1 "Reboot initiated by Ansible"
+        shutdown -r now "Reboot initiated by Ansible"
       async: 1
       poll: 0
       ignore_errors: true
@@ -20,8 +23,9 @@
       ansible.builtin.wait_for:
         host: "{{ reboot_wait_host }}"
         port: 22
-        state: drained
-        timeout: 120
+        state: stopped
+        delay: 5
+        timeout: "{{ reboot_down_timeout }}"
       delegate_to: localhost
 
     - name: Wait for server to come back
@@ -30,12 +34,13 @@
         port: 22
         state: started
         delay: 30
-        timeout: 420
+        timeout: "{{ reboot_up_timeout }}"
       delegate_to: localhost
 
-    - name: Wait for SSH to stabilize
-      ansible.builtin.pause:
-        seconds: 30
+    - name: Wait for Ansible SSH connection to stabilize
+      ansible.builtin.wait_for_connection:
+        delay: 15
+        timeout: "{{ ssh_stabilize_timeout }}"
 
     - name: Validate server after reboot
       ansible.builtin.shell: |
