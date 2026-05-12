@@ -1,0 +1,253 @@
+---
+- name: Periodic Linux reboot with app-aware checks
+  hosts: "{{ target_hosts | default('all') }}"
+  become: true
+  gather_facts: true
+  serial: "{{ serial_count | default(1) }}"
+
+  vars:
+    reboot_timeout_seconds: 1800
+    post_reboot_delay_seconds: 45
+    pre_reboot_delay_seconds: 5
+
+    report_dir: /tmp/periodic-reboot
+    report_file: "{{ report_dir }}/{{ ansible_date_time.date }}-{{ inventory_hostname }}.log"
+
+    # Scalable options:
+    #
+    # 1) Preferred for many servers:
+    #    Put service and command variables in inventory/group_vars/host_vars:
+    #
+    #      app_services:
+    #        - httpd
+    #        - crond
+    #
+    #      app_pre_commands:
+    #        - name: Check app status
+    #          cmd: /opt/app/bin/status
+    #          required: true
+    #
+    #      app_post_commands:
+    #        - name: Check health endpoint
+    #          cmd: curl -fsS http://localhost:8080/health
+    #          required: true
+    #
+    # 2) Optional:
+    #    Use app_profile when many servers share exactly the same checks.
+    #
+    # Example:
+    #   [tomcat_servers:vars]
+    #   app_profile=tomcat
+    app_checks:
+      default:
+        services: []
+        pre_commands: []
+        post_commands: []
+
+      tomcat:
+        services:
+          - tomcat
+        pre_commands:
+          - name: Check Java processes
+            cmd: pgrep -af java
+            required: false
+        post_commands:
+          - name: Check Tomcat listening port
+            cmd: ss -lntp | grep -E ':8080\\b'
+            required: false
+
+      apache:
+        services:
+          - httpd
+        pre_commands:
+          - name: Check HTTPD config
+            cmd: apachectl configtest
+            required: true
+        post_commands:
+          - name: Check HTTP local response
+            cmd: curl -fsS http://localhost/
+            required: false
+
+      generic:
+        services: []
+        pre_commands: []
+        post_commands: []
+
+  pre_tasks:
+    - name: Validate app profile
+      ansible.builtin.assert:
+        that:
+          - app_profile | default('default') in app_checks
+        fail_msg: >-
+          app_profile={{ app_profile | default('UNDEFINED') }} is not defined in app_checks.
+          Define it in inventory/group_vars/host_vars or add a profile in this playbook.
+
+    - name: Select checks for this host
+      ansible.builtin.set_fact:
+        selected_app_profile: "{{ app_profile | default('default') }}"
+        selected_app_checks: "{{ app_checks[app_profile | default('default')] }}"
+
+    - name: Build effective app checks for this host
+      ansible.builtin.set_fact:
+        effective_app_services: "{{ app_services | default(selected_app_checks.services | default([])) }}"
+        effective_pre_commands: "{{ app_pre_commands | default(selected_app_checks.pre_commands | default([])) }}"
+        effective_post_commands: "{{ app_post_commands | default(selected_app_checks.post_commands | default([])) }}"
+
+    - name: Create local report directory
+      ansible.builtin.file:
+        path: "{{ report_dir }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+      become: false
+
+    - name: Start local reboot report
+      ansible.builtin.copy:
+        dest: "{{ report_file }}"
+        mode: "0644"
+        content: |
+          Host: {{ inventory_hostname }}
+          Profile: {{ selected_app_profile }}
+          Started: {{ ansible_date_time.iso8601 }}
+          Kernel before: {{ ansible_kernel }}
+          Uptime before:
+      delegate_to: localhost
+      become: false
+
+  tasks:
+    - name: Pre-check uptime
+      ansible.builtin.command: uptime
+      register: pre_uptime
+      changed_when: false
+
+    - name: Add pre-check uptime to report
+      ansible.builtin.lineinfile:
+        path: "{{ report_file }}"
+        line: "{{ pre_uptime.stdout }}"
+        insertafter: EOF
+      delegate_to: localhost
+      become: false
+
+    - name: Pre-check disk usage
+      ansible.builtin.shell: df -hP
+      register: pre_disk
+      changed_when: false
+
+    - name: Pre-check failed systemd units
+      ansible.builtin.command: systemctl --failed --no-pager
+      register: pre_systemd_failed
+      changed_when: false
+      failed_when: false
+
+    - name: Pre-check required services for profile
+      ansible.builtin.command: "systemctl is-active {{ item }}"
+      loop: "{{ effective_app_services }}"
+      register: pre_service_status
+      changed_when: false
+      failed_when: pre_service_status.rc != 0
+
+    - name: Run app-specific pre-check commands
+      ansible.builtin.shell: "{{ item.cmd }}"
+      loop: "{{ effective_pre_commands }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: app_pre_checks
+      changed_when: false
+      failed_when: item.required | default(true) | bool and app_pre_checks.rc != 0
+
+    - name: Save pre-check details locally
+      ansible.builtin.blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} PRECHECK DETAILS"
+        block: |
+          Disk:
+          {{ pre_disk.stdout | default('') }}
+
+          systemctl --failed:
+          {{ pre_systemd_failed.stdout | default('') }}
+
+          Service status:
+          {% for result in pre_service_status.results | default([]) %}
+          - {{ result.item }}: rc={{ result.rc }} stdout={{ result.stdout | default('') }}
+          {% endfor %}
+
+          App pre-checks:
+          {% for result in app_pre_checks.results | default([]) %}
+          - {{ result.item.name }}: rc={{ result.rc }}
+            stdout={{ result.stdout | default('') }}
+            stderr={{ result.stderr | default('') }}
+          {% endfor %}
+      delegate_to: localhost
+      become: false
+
+    - name: Reboot host
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ reboot_timeout_seconds }}"
+        pre_reboot_delay: "{{ pre_reboot_delay_seconds }}"
+        post_reboot_delay: "{{ post_reboot_delay_seconds }}"
+        test_command: whoami
+      register: reboot_result
+
+    - name: Gather facts after reboot
+      ansible.builtin.setup:
+
+    - name: Post-check uptime
+      ansible.builtin.command: uptime
+      register: post_uptime
+      changed_when: false
+
+    - name: Post-check failed systemd units
+      ansible.builtin.command: systemctl --failed --no-pager
+      register: post_systemd_failed
+      changed_when: false
+      failed_when: false
+
+    - name: Post-check required services for profile
+      ansible.builtin.command: "systemctl is-active {{ item }}"
+      loop: "{{ effective_app_services }}"
+      register: post_service_status
+      changed_when: false
+      failed_when: post_service_status.rc != 0
+
+    - name: Run app-specific post-check commands
+      ansible.builtin.shell: "{{ item.cmd }}"
+      loop: "{{ effective_post_commands }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: app_post_checks
+      changed_when: false
+      failed_when: item.required | default(true) | bool and app_post_checks.rc != 0
+
+    - name: Save post-check details locally
+      ansible.builtin.blockinfile:
+        path: "{{ report_file }}"
+        marker: "# {mark} POSTCHECK DETAILS"
+        block: |
+          Reboot elapsed seconds: {{ reboot_result.elapsed | default('unknown') }}
+          Kernel after: {{ ansible_kernel }}
+          Uptime after:
+          {{ post_uptime.stdout | default('') }}
+
+          systemctl --failed:
+          {{ post_systemd_failed.stdout | default('') }}
+
+          Service status:
+          {% for result in post_service_status.results | default([]) %}
+          - {{ result.item }}: rc={{ result.rc }} stdout={{ result.stdout | default('') }}
+          {% endfor %}
+
+          App post-checks:
+          {% for result in app_post_checks.results | default([]) %}
+          - {{ result.item.name }}: rc={{ result.rc }}
+            stdout={{ result.stdout | default('') }}
+            stderr={{ result.stderr | default('') }}
+          {% endfor %}
+      delegate_to: localhost
+      become: false
+
+    - name: Show reboot summary
+      ansible.builtin.debug:
+        msg:
+          - "Host {{ inventory_hostname }} reboot completed."
+          - "Profile: {{ selected_app_profile }}"
+          - "Report: {{ report_file }}"
