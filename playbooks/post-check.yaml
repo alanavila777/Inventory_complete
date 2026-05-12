@@ -42,7 +42,7 @@
               found_missing=1
               echo "$mp"
 
-              if awk -v mp="$mp" '$2 == mp { found=1 } END { exit !found }' /etc/fstab; then
+              if awk -v mp="$mp" '$0 !~ /^[[:space:]]*#/ && $2 == mp { found=1 } END { exit !found }' /etc/fstab; then
                 echo "Trying to mount $mp"
                 mount "$mp" 2>&1 && \
                   echo "$mp mounted successfully" || \
