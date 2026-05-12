@@ -4,6 +4,9 @@
   become: yes
   gather_facts: yes
 
+  vars:
+    reboot_wait_host: "{{ ansible_host | default(inventory_hostname) }}"
+
   tasks:
 
     - name: Trigger reboot
@@ -15,7 +18,7 @@
 
     - name: Wait for server to go down
       ansible.builtin.wait_for:
-        host: "{{ inventory_hostname }}"
+        host: "{{ reboot_wait_host }}"
         port: 22
         state: drained
         timeout: 120
@@ -23,7 +26,7 @@
 
     - name: Wait for server to come back
       ansible.builtin.wait_for:
-        host: "{{ inventory_hostname }}"
+        host: "{{ reboot_wait_host }}"
         port: 22
         state: started
         delay: 30
