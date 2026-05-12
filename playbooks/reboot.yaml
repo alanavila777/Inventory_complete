@@ -1,0 +1,47 @@
+---
+- name: Reboot Linux servers using shell
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  tasks:
+
+    - name: Trigger reboot
+      ansible.builtin.shell: |
+        shutdown -r +1 "Reboot initiated by Ansible"
+      async: 1
+      poll: 0
+      ignore_errors: true
+
+    - name: Wait for server to go down
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        state: drained
+        timeout: 120
+      delegate_to: localhost
+
+    - name: Wait for server to come back
+      ansible.builtin.wait_for:
+        host: "{{ inventory_hostname }}"
+        port: 22
+        state: started
+        delay: 30
+        timeout: 420
+      delegate_to: localhost
+
+    - name: Wait for SSH to stabilize
+      ansible.builtin.pause:
+        seconds: 30
+
+    - name: Validate server after reboot
+      ansible.builtin.shell: |
+        hostname
+        uptime
+        uname -r
+      register: reboot_status
+      changed_when: false
+
+    - name: Show reboot status
+      ansible.builtin.debug:
+        var: reboot_status.stdout_lines
