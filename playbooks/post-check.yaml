@@ -10,6 +10,16 @@
 
   tasks:
 
+    - name: Validate required pre-check files exist
+      ansible.builtin.stat:
+        path: "{{ precheck_dir }}/{{ item }}.{{ host_id }}"
+      loop:
+        - enabled_services
+        - mount
+        - ps
+      register: required_precheck_files
+      failed_when: not required_precheck_files.stat.exists
+
     - name: Save post-check outputs
       ansible.builtin.shell: |
         df -h > {{ precheck_dir }}/df_post.{{ host_id }}
@@ -42,7 +52,7 @@
             if ! mountpoint -q "$mp"; then
               echo "$mp" >> "$OUT"
 
-              if grep -q "[[:space:]]$mp[[:space:]]" /etc/fstab; then
+              if awk -v mp="$mp" '$2 == mp { found=1 } END { exit !found }' /etc/fstab; then
                 echo "Trying to mount $mp" >> "$FIX"
                 mount "$mp" >> "$FIX" 2>&1 && \
                   echo "$mp mounted successfully" >> "$FIX" || \
@@ -70,6 +80,13 @@
 
         while read svc; do
           [ -z "$svc" ] && continue
+
+          case "$svc" in
+            *@.service)
+              echo "$svc - template service skipped" >> "$OUT"
+              continue
+              ;;
+          esac
 
           state=$(systemctl is-active "$svc" 2>/dev/null || true)
 
