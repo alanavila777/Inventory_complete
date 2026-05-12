@@ -10,11 +10,21 @@
 
   tasks:
 
-    - name: Save running services
+    - name: Save enabled services
       ansible.builtin.shell: |
         systemctl list-unit-files --type=service --state=enabled --no-legend \
         | awk '{print $1}' \
         > {{ precheck_dir }}/enabled_services.{{ host_id }}
+      changed_when: false
+
+    - name: Save filesystem mounts
+      ansible.builtin.shell: |
+        mount > {{ precheck_dir }}/mount.{{ host_id }}
+      changed_when: false
+
+    - name: Save process list
+      ansible.builtin.shell: |
+        ps -ef > {{ precheck_dir }}/ps.{{ host_id }}
       changed_when: false
 
     - name: Save netstat output
@@ -46,7 +56,9 @@
     - name: Validate generated files
       ansible.builtin.shell: |
         ls -lh \
-        {{ precheck_dir }}/services_running.{{ host_id }} \
+        {{ precheck_dir }}/enabled_services.{{ host_id }} \
+        {{ precheck_dir }}/mount.{{ host_id }} \
+        {{ precheck_dir }}/ps.{{ host_id }} \
         {{ precheck_dir }}/netstat.{{ host_id }} \
         {{ precheck_dir }}/ss.{{ host_id }}
       register: precheck_files
