@@ -74,12 +74,26 @@
               echo "$svc - template service skipped"
               continue
               ;;
+            dbus-org.*.service)
+              echo "$svc - dbus alias service skipped"
+              continue
+              ;;
           esac
 
           state=$(systemctl is-active "$svc" 2>/dev/null || true)
 
           if [ "$state" != "active" ]; then
+            svc_type=$(systemctl show "$svc" -p Type --value 2>/dev/null || true)
+            result=$(systemctl show "$svc" -p Result --value 2>/dev/null || true)
+            exec_status=$(systemctl show "$svc" -p ExecMainStatus --value 2>/dev/null || true)
+
+            if [ "$svc_type" = "oneshot" ] && [ "$result" = "success" ] && [ "$exec_status" = "0" ]; then
+              echo "$svc - type: oneshot, state: $state, result: $result, exec status: $exec_status, OK"
+              continue
+            fi
+
             echo "$svc - current state: $state"
+            echo "$svc - type: $svc_type, result: $result, exec status: $exec_status"
 
             echo "Trying to start $svc"
             systemctl start "$svc" 2>&1 && \
