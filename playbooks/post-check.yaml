@@ -1,0 +1,133 @@
+---
+- name: Linux post-check after reboot
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    precheck_dir: /tmp
+    host_id: "{{ ansible_hostname | default(inventory_hostname) }}"
+
+  tasks:
+
+    - name: Save post-check outputs
+      ansible.builtin.shell: |
+        df -h > {{ precheck_dir }}/df_post.{{ host_id }}
+        mount > {{ precheck_dir }}/mount_post.{{ host_id }}
+        ps -ef > {{ precheck_dir }}/ps_post.{{ host_id }}
+        netstat -tulpn > {{ precheck_dir }}/netstat_post.{{ host_id }} 2>/dev/null || true
+        ss -tulpn > {{ precheck_dir }}/ss_post.{{ host_id }} 2>/dev/null || true
+      changed_when: false
+
+    - name: Check missing filesystems and try to mount them
+      ansible.builtin.shell: |
+        PRE_MOUNT="{{ precheck_dir }}/mount.{{ host_id }}"
+        OUT="{{ precheck_dir }}/missing_mounts.{{ host_id }}"
+        FIX="{{ precheck_dir }}/mount_fix_attempts.{{ host_id }}"
+
+        > "$OUT"
+        > "$FIX"
+
+        if [ ! -f "$PRE_MOUNT" ]; then
+          echo "Missing pre-check mount file: $PRE_MOUNT"
+          exit 1
+        fi
+
+        awk '{print $3}' "$PRE_MOUNT" \
+        | egrep -v '^/(proc|sys|dev|run|boot|var/lib/docker|var/lib/containers)($|/)' \
+        | sort -u \
+        | while read mp; do
+            [ -z "$mp" ] && continue
+
+            if ! mountpoint -q "$mp"; then
+              echo "$mp" >> "$OUT"
+
+              if grep -q "[[:space:]]$mp[[:space:]]" /etc/fstab; then
+                echo "Trying to mount $mp" >> "$FIX"
+                mount "$mp" >> "$FIX" 2>&1 && \
+                  echo "$mp mounted successfully" >> "$FIX" || \
+                  echo "$mp failed to mount" >> "$FIX"
+              else
+                echo "$mp not found in /etc/fstab, skipping" >> "$FIX"
+              fi
+            fi
+          done
+      changed_when: false
+
+    - name: Check enabled services and start inactive ones
+      ansible.builtin.shell: |
+        PRE_SERVICES="{{ precheck_dir }}/enabled_services.{{ host_id }}"
+        OUT="{{ precheck_dir }}/services_not_active_after_reboot.{{ host_id }}"
+        FIX="{{ precheck_dir }}/services_start_attempts.{{ host_id }}"
+
+        > "$OUT"
+        > "$FIX"
+
+        if [ ! -f "$PRE_SERVICES" ]; then
+          echo "Missing pre-check enabled services file: $PRE_SERVICES"
+          exit 1
+        fi
+
+        while read svc; do
+          [ -z "$svc" ] && continue
+
+          state=$(systemctl is-active "$svc" 2>/dev/null || true)
+
+          if [ "$state" != "active" ]; then
+            echo "$svc - current state: $state" >> "$OUT"
+
+            echo "Trying to start $svc" >> "$FIX"
+            systemctl start "$svc" >> "$FIX" 2>&1 && \
+              echo "$svc started successfully" >> "$FIX" || \
+              echo "$svc failed to start" >> "$FIX"
+          fi
+        done < "$PRE_SERVICES"
+      changed_when: false
+
+    - name: Compare process list before and after reboot
+      ansible.builtin.shell: |
+        PRE_PS="{{ precheck_dir }}/ps.{{ host_id }}"
+        POST_PS="{{ precheck_dir }}/ps_post.{{ host_id }}"
+        OUT="{{ precheck_dir }}/ps_missing_after_reboot.{{ host_id }}"
+
+        > "$OUT"
+
+        if [ ! -f "$PRE_PS" ]; then
+          echo "Missing pre-check ps file: $PRE_PS"
+          exit 1
+        fi
+
+        awk '{$2=""; $3=""; $4=""; $5=""; $6=""; $7=""; $8=""; print $0}' "$PRE_PS" | sort -u > /tmp/ps_before_normalized.{{ host_id }}
+        awk '{$2=""; $3=""; $4=""; $5=""; $6=""; $7=""; $8=""; print $0}' "$POST_PS" | sort -u > /tmp/ps_after_normalized.{{ host_id }}
+
+        comm -23 /tmp/ps_before_normalized.{{ host_id }} /tmp/ps_after_normalized.{{ host_id }} > "$OUT"
+      changed_when: false
+      failed_when: false
+
+    - name: Show post-check summary
+      ansible.builtin.shell: |
+        echo "===== Missing mounts ====="
+        cat {{ precheck_dir }}/missing_mounts.{{ host_id }} 2>/dev/null || true
+
+        echo ""
+        echo "===== Mount fix attempts ====="
+        cat {{ precheck_dir }}/mount_fix_attempts.{{ host_id }} 2>/dev/null || true
+
+        echo ""
+        echo "===== Services not active after reboot ====="
+        cat {{ precheck_dir }}/services_not_active_after_reboot.{{ host_id }} 2>/dev/null || true
+
+        echo ""
+        echo "===== Service start attempts ====="
+        cat {{ precheck_dir }}/services_start_attempts.{{ host_id }} 2>/dev/null || true
+
+        echo ""
+        echo "===== Processes missing after reboot - review manually ====="
+        cat {{ precheck_dir }}/ps_missing_after_reboot.{{ host_id }} 2>/dev/null || true
+      register: postcheck_summary
+      changed_when: false
+      failed_when: false
+
+    - name: Display post-check summary
+      ansible.builtin.debug:
+        var: postcheck_summary.stdout_lines
