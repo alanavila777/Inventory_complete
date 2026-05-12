@@ -12,8 +12,9 @@
 
     - name: Save running services
       ansible.builtin.shell: |
-        systemctl list-units --type=service --state=running \
-        > {{ precheck_dir }}/services_running.{{ host_id }}
+        systemctl list-unit-files --type=service --state=enabled --no-legend \
+        | awk '{print $1}' \
+        > {{ precheck_dir }}/enabled_services.{{ host_id }}
       changed_when: false
 
     - name: Save netstat output
