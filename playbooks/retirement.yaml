@@ -7,9 +7,6 @@
   vars_files:
     - vcenter-vault.yaml
 
-  vars:
-    decom_folder: "/DECOM"
-
   tasks:
     - name: Detect Operating System
       set_fact:
@@ -40,11 +37,12 @@
 
     - name: Detect VM datacenter automatically
       set_fact:
-        vm_datacenter: >-
-          {{
-            vm_found.datacenter
-            | default(vm_found.folder.split('/')[1])
-          }}
+        vm_datacenter: "{{ vm_found.datacenter | default(vm_found.folder.split('/')[1]) }}"
+      delegate_to: localhost
+
+    - name: Set DECOM folder path automatically
+      set_fact:
+        decom_folder_path: "/{{ vm_datacenter }}/vm/DECOM"
       delegate_to: localhost
 
     - name: Show VM status
@@ -53,7 +51,8 @@
           - "VM Name: {{ vm_found.guest_name }}"
           - "Power: {{ vm_found.power_state }}"
           - "Datacenter: {{ vm_datacenter }}"
-          - "Folder: {{ vm_found.folder | default('N/A') }}"
+          - "DECOM Folder: {{ decom_folder_path }}"
+          - "Current Folder: {{ vm_found.folder | default('N/A') }}"
 
     - name: Linux Decommission
       block:
@@ -132,5 +131,5 @@
         validate_certs: false
         datacenter: "{{ vm_datacenter }}"
         name: "{{ vm_found.guest_name }}_DECOM"
-        dest_folder: "{{ decom_folder }}"
+        dest_folder: "{{ decom_folder_path }}"
       delegate_to: localhost
