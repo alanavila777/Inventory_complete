@@ -28,7 +28,9 @@
       set_fact:
         vm_found: "{{ item }}"
       loop: "{{ vm_info.virtual_machines }}"
-      when: item.guest_name | lower == inventory_hostname | lower
+      when:
+        - item.guest_name is defined
+        - item.guest_name | lower == inventory_hostname | lower
       delegate_to: localhost
 
     - name: Fail if VM was not found
@@ -36,11 +38,22 @@
         msg: "VM {{ inventory_hostname }} not found in vCenter."
       when: vm_found is not defined
 
+    - name: Detect VM datacenter automatically
+      set_fact:
+        vm_datacenter: >-
+          {{
+            vm_found.datacenter
+            | default(vm_found.folder.split('/')[1])
+          }}
+      delegate_to: localhost
+
     - name: Show VM status
       debug:
         msg:
           - "VM Name: {{ vm_found.guest_name }}"
           - "Power: {{ vm_found.power_state }}"
+          - "Datacenter: {{ vm_datacenter }}"
+          - "Folder: {{ vm_found.folder | default('N/A') }}"
 
     - name: Linux Decommission
       block:
@@ -105,6 +118,7 @@
         username: "{{ vcenter_username }}"
         password: "{{ vcenter_password }}"
         validate_certs: false
+        datacenter: "{{ vm_datacenter }}"
         uuid: "{{ vm_found.uuid }}"
         name: "{{ vm_found.guest_name }}_DECOM"
         state: present
@@ -116,6 +130,7 @@
         username: "{{ vcenter_username }}"
         password: "{{ vcenter_password }}"
         validate_certs: false
+        datacenter: "{{ vm_datacenter }}"
         name: "{{ vm_found.guest_name }}_DECOM"
         dest_folder: "{{ decom_folder }}"
       delegate_to: localhost
