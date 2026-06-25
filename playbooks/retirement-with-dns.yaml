@@ -8,7 +8,7 @@
     - vcenter-vault.yaml
 
   vars:
-    delete_dns_record: false
+    delete_dns_record: true
     dns_zone: lab.local
 
   tasks:
