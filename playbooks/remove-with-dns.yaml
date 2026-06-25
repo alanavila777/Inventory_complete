@@ -5,7 +5,7 @@
   become: true
 
   vars_files:
-    - retirement-vault.yaml
+    - vcenter-vault.yaml
 
   vars:
     delete_dns_record: false
@@ -15,10 +15,44 @@
       set_fact:
         os_type: "{{ 'windows' if ansible_os_family == 'Windows' else 'linux' }}"
 
-    - name: Detect DNS record and zone from facts
+    - name: Detect VM IP from facts
+      set_fact:
+        vm_ip: "{{ ansible_default_ipv4.address | default(ansible_ip_addresses[0]) }}"
+
+    - name: Resolve FQDN from DNS using VM IP
+      command: "getent hosts {{ vm_ip }}"
+      delegate_to: localhost
+      register: dns_lookup
+      changed_when: false
+      failed_when: false
+
+    - name: Set DNS record and zone from reverse DNS
+      set_fact:
+        dns_fqdn: "{{ dns_lookup.stdout.split()[1] | default('') }}"
+        dns_record_name: "{{ dns_lookup.stdout.split()[1].split('.')[0] | default(ansible_hostname) }}"
+        dns_zone: "{{ dns_lookup.stdout.split()[1].split('.', 1)[1] | default('') }}"
+      when: dns_lookup.stdout | length > 0
+
+    - name: Fallback DNS record and zone from facts
       set_fact:
         dns_record_name: "{{ ansible_hostname | default(inventory_hostname.split('.')[0]) }}"
-        dns_zone: "{{ ansible_domain | default(inventory_hostname.split('.', 1)[1] | default('')) }}"
+        dns_zone: >-
+          {{
+            ansible_domain
+            | default(ansible_fqdn.split('.', 1)[1], true)
+            | default(inventory_hostname.split('.', 1)[1], true)
+            | default('', true)
+          }}
+      when: dns_lookup.stdout | length == 0
+
+    - name: Show DNS detection
+      debug:
+        msg:
+          - "VM IP: {{ vm_ip }}"
+          - "Reverse DNS output: {{ dns_lookup.stdout | default('N/A') }}"
+          - "DNS FQDN: {{ dns_fqdn | default('N/A') }}"
+          - "DNS Record: {{ dns_record_name | default('N/A') }}"
+          - "DNS Zone: {{ dns_zone | default('N/A') }}"
 
     - name: Get VM inventory from vCenter
       community.vmware.vmware_vm_info:
@@ -178,10 +212,5 @@
             ansible_winrm_transport: ntlm
             ansible_winrm_server_cert_validation: ignore
           when: dns_record_check.stdout | length > 0
-
-        - name: DNS record not found
-          debug:
-            msg: "DNS record {{ dns_record_name }}.{{ dns_zone }} was not found. Nothing to delete."
-          when: dns_record_check.stdout | length == 0
 
       when: delete_dns_record | bool
