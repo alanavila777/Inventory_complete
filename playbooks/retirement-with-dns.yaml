@@ -1,0 +1,180 @@
+---
+- name: VM Retirement
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars_files:
+    - vcenter-vault.yaml
+
+  vars:
+    delete_dns_record: false
+    dns_zone: lab.local
+
+  tasks:
+    - name: Detect Operating System
+      set_fact:
+        os_type: "{{ 'windows' if ansible_os_family == 'Windows' else 'linux' }}"
+
+    - name: Detect DNS record name
+      set_fact:
+        dns_record_name: "{{ ansible_hostname | default(inventory_hostname.split('.')[0]) }}"
+
+    - name: Get VM inventory from vCenter
+      community.vmware.vmware_vm_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+      delegate_to: localhost
+      register: vm_info
+
+    - name: Find VM by hostname case insensitive
+      set_fact:
+        vm_found: "{{ item }}"
+      loop: "{{ vm_info.virtual_machines }}"
+      when:
+        - item.guest_name is defined
+        - item.guest_name | lower == inventory_hostname | lower
+      delegate_to: localhost
+
+    - name: Fail if VM was not found
+      fail:
+        msg: "VM {{ inventory_hostname }} not found in vCenter."
+      when: vm_found is not defined
+
+    - name: Detect VM datacenter automatically
+      set_fact:
+        vm_datacenter: "{{ vm_found.datacenter | default(vm_found.folder.split('/')[1]) }}"
+      delegate_to: localhost
+
+    - name: Set DECOM folder path automatically
+      set_fact:
+        decom_folder_path: "/{{ vm_datacenter }}/vm/DECOM"
+      delegate_to: localhost
+
+    - name: Show VM status
+      debug:
+        msg:
+          - "VM Name: {{ vm_found.guest_name }}"
+          - "Power: {{ vm_found.power_state }}"
+          - "Datacenter: {{ vm_datacenter }}"
+          - "DECOM Folder: {{ decom_folder_path }}"
+          - "Current Folder: {{ vm_found.folder | default('N/A') }}"
+          - "DNS Record: {{ dns_record_name }}"
+          - "DNS Zone: {{ dns_zone }}"
+
+    - name: Linux Decommission
+      block:
+        - name: Stop OneAgent
+          systemd:
+            name: oneagent
+            state: stopped
+          ignore_errors: true
+
+        - name: Remove from Centrify
+          command: adleave -r -f
+          ignore_errors: true
+
+        - name: Save ps output
+          shell: "ps -ef > /tmp/{{ inventory_hostname }}_ps_ef.txt"
+
+        - name: Save df output
+          shell: "df -h > /tmp/{{ inventory_hostname }}_df_h.txt"
+
+        - name: Shutdown Linux
+          shell: shutdown -h now
+          async: 1
+          poll: 0
+          ignore_errors: true
+
+      when:
+        - os_type == "linux"
+        - vm_found.power_state == "poweredOn"
+
+    - name: Windows Decommission
+      block:
+        - name: Save process list
+          win_shell: |
+            Get-Process | Out-File C:\Windows\Temp\{{ inventory_hostname }}_processes.txt
+
+        - name: Save disk usage
+          win_shell: |
+            Get-PSDrive -PSProvider FileSystem | Out-File C:\Windows\Temp\{{ inventory_hostname }}_disk.txt
+
+        - name: Shutdown Windows
+          win_shell: |
+            Stop-Computer -Force
+
+      when:
+        - os_type == "windows"
+        - vm_found.power_state == "poweredOn"
+
+    - name: Wait until VM is powered off
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        name: "{{ vm_found.guest_name }}"
+        state: powered-off
+        state_change_timeout: 900
+      delegate_to: localhost
+
+    - name: Rename VM with _DECOM
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ vm_datacenter }}"
+        uuid: "{{ vm_found.uuid }}"
+        name: "{{ vm_found.guest_name }}_DECOM"
+        state: present
+      delegate_to: localhost
+
+    - name: Move VM to DECOM folder
+      community.vmware.vmware_guest_move:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        datacenter: "{{ vm_datacenter }}"
+        name: "{{ vm_found.guest_name }}_DECOM"
+        dest_folder: "{{ decom_folder_path }}"
+      delegate_to: localhost
+
+    - name: DNS Cleanup
+      block:
+        - name: Check DNS A record
+          win_shell: |
+            Get-DnsServerResourceRecord -ZoneName "{{ dns_zone }}" -Name "{{ dns_record_name }}" -RRType A -ErrorAction SilentlyContinue
+          delegate_to: "{{ dns_server }}"
+          become: false
+          vars:
+            ansible_connection: winrm
+            ansible_user: "{{ dns_user }}"
+            ansible_password: "{{ dns_password }}"
+            ansible_winrm_transport: ntlm
+            ansible_winrm_server_cert_validation: ignore
+          register: dns_record_check
+
+        - name: Delete DNS A record
+          win_shell: |
+            Remove-DnsServerResourceRecord -ZoneName "{{ dns_zone }}" -Name "{{ dns_record_name }}" -RRType A -Force
+          delegate_to: "{{ dns_server }}"
+          become: false
+          vars:
+            ansible_connection: winrm
+            ansible_user: "{{ dns_user }}"
+            ansible_password: "{{ dns_password }}"
+            ansible_winrm_transport: ntlm
+            ansible_winrm_server_cert_validation: ignore
+          when: dns_record_check.stdout | length > 0
+
+        - name: DNS record not found
+          debug:
+            msg: "DNS record {{ dns_record_name }}.{{ dns_zone }} was not found. Nothing to delete."
+          when: dns_record_check.stdout | length == 0
+
+      when: delete_dns_record | bool
