@@ -100,13 +100,14 @@
       delegate_to: localhost
 
     - name: Rename VM with _DECOM
-      community.vmware.vmware_guest_rename:
+      community.vmware.vmware_guest:
         hostname: "{{ vcenter_hostname }}"
         username: "{{ vcenter_username }}"
         password: "{{ vcenter_password }}"
         validate_certs: false
-        name: "{{ vm_found.guest_name }}"
-        new_name: "{{ vm_found.guest_name }}_DECOM"
+        uuid: "{{ vm_found.uuid }}"
+        name: "{{ vm_found.guest_name }}_DECOM"
+        state: present
       delegate_to: localhost
 
     - name: Move VM to DECOM folder
