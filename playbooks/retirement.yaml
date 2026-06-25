@@ -1,0 +1,146 @@
+---
+- name: VM Decommission
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars_files:
+    - vcenter-vault.yaml
+
+  vars:
+    decom_folder: "/DECOM"
+
+  tasks:
+
+    - name: Detect Operating System
+      set_fact:
+        os_type: "{{ 'windows' if ansible_os_family == 'Windows' else 'linux' }}"
+
+    - name: Display detected OS
+      debug:
+        msg: "{{ inventory_hostname }} is {{ os_type }}"
+
+    ####################################################################
+    # Find VM in vCenter
+    ####################################################################
+
+    - name: Get VM inventory from vCenter
+      community.vmware.vmware_vm_info:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+      delegate_to: localhost
+      register: vm_info
+
+    - name: Find VM by hostname (case insensitive)
+      set_fact:
+        vm_found: "{{ item }}"
+      loop: "{{ vm_info.virtual_machines }}"
+      when:
+        - item.guest_name | lower == inventory_hostname | lower
+      delegate_to: localhost
+
+    - name: Fail if VM was not found
+      fail:
+        msg: "VM {{ inventory_hostname }} not found in vCenter."
+      when: vm_found is not defined
+
+    - name: Display VM status
+      debug:
+        msg:
+          - "VM Name : {{ vm_found.guest_name }}"
+          - "Power   : {{ vm_found.power_state }}"
+
+    ####################################################################
+    # Linux
+    ####################################################################
+
+    - name: Linux Decommission
+      block:
+
+        - name: Stop OneAgent
+          systemd:
+            name: oneagent
+            state: stopped
+          ignore_errors: true
+
+        - name: Remove from Centrify
+          command: adleave -r -f
+          ignore_errors: true
+
+        - name: Save process list
+          shell: ps -ef > /tmp/{{ inventory_hostname }}_ps.txt
+
+        - name: Save filesystem usage
+          shell: df -h > /tmp/{{ inventory_hostname }}_df.txt
+
+        - name: Shutdown Linux
+          shell: shutdown -h now
+          async: 1
+          poll: 0
+          ignore_errors: true
+
+      when:
+        - os_type == "linux"
+        - vm_found.power_state == "poweredOn"
+
+    ####################################################################
+    # Windows
+    ####################################################################
+
+    - name: Windows Decommission
+      block:
+
+        - name: Export running processes
+          win_shell: |
+            Get-Process | Out-File C:\Windows\Temp\processes.txt
+
+        - name: Export disk usage
+          win_shell: |
+            Get-PSDrive -PSProvider FileSystem | Out-File C:\Windows\Temp\disk.txt
+
+        - name: Shutdown Windows
+          win_shell: |
+            Stop-Computer -Force
+
+      when:
+        - os_type == "windows"
+        - vm_found.power_state == "poweredOn"
+
+    ####################################################################
+    # VMware
+    ####################################################################
+
+    - name: Wait until VM is powered off
+      community.vmware.vmware_guest_powerstate:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        name: "{{ vm_found.guest_name }}"
+        state: powered-off
+        state_change_timeout: 900
+      delegate_to: localhost
+
+    - name: Rename VM
+      community.vmware.vmware_guest:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        name: "{{ vm_found.guest_name }}"
+        state: present
+        name_match: first
+        new_name: "{{ vm_found.guest_name }}_DECOM"
+      delegate_to: localhost
+
+    - name: Move VM to DECOM folder
+      community.vmware.vmware_guest_move:
+        hostname: "{{ vcenter_hostname }}"
+        username: "{{ vcenter_username }}"
+        password: "{{ vcenter_password }}"
+        validate_certs: false
+        name: "{{ vm_found.guest_name }}_DECOM"
+        dest_folder: "{{ decom_folder }}"
+      delegate_to: localhost
