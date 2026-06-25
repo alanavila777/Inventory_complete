@@ -5,7 +5,7 @@
   become: true
 
   vars_files:
-    - vcenter-vault.yaml
+    - retirement-vault.yaml
 
   vars:
     delete_dns_record: true
